@@ -1,0 +1,36 @@
+{
+  "name": "video-studio-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "typecheck": "tsc -p tsconfig.typecheck.json --noEmit"
+  },
+  "dependencies": {
+    "@radix-ui/react-slot": "1.2.4",
+    "@remotion/player": "4.0.448",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "lucide-react": "1.8.0",
+    "next": "16.2.4",
+    "react": "19.2.5",
+    "react-dom": "19.2.5",
+    "remotion": "4.0.448",
+    "tailwind-merge": "3.5.0",
+    "zustand": "5.0.12"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.2.4",
+    "@types/node": "^22.15.30",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "eslint": "^9.39.1",
+    "eslint-config-next": "16.2.4",
+    "postcss": "^8.5.6",
+    "tailwindcss": "4.2.4",
+    "typescript": "^5.9.3"
+  }
+}

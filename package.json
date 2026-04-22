@@ -1,0 +1,22 @@
+{
+  "name": "video-studio",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/electron/main/index.js",
+  "scripts": {
+    "dev": "concurrently -n NEXT,ELECTRON -c blue,green \"yarn --cwd frontend dev\" \"wait-on http://localhost:3000 && yarn build:electron && electron .\"",
+    "build:frontend": "yarn --cwd frontend build",
+    "build:electron": "tsc -p electron/tsconfig.json",
+    "build": "yarn build:frontend && yarn build:electron",
+    "electron": "electron .",
+    "package": "yarn build && electron-builder"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "concurrently": "^9.1.2",
+    "electron": "^35.2.1",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.9.3",
+    "wait-on": "^8.0.3"
+  }
+}

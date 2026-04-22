@@ -1,0 +1,41 @@
+appId: com.video-studio.app
+productName: Video Studio
+copyright: Copyright © 2025
+
+directories:
+  output: release
+  buildResources: assets
+
+files:
+  - package.json
+  - dist/electron/**/*
+
+extraResources:
+  - from: frontend/out
+    to: renderer
+    filter:
+      - "**/*"
+
+asar: true
+
+mac:
+  category: public.app-category.video
+  icon: assets/icon.png
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+
+dmg:
+  title: Video Studio
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+linux:
+  target:
+    - AppImage

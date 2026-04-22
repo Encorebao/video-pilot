@@ -1,0 +1,64 @@
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Node / Yarn ───────────────────────────────────────────────────────────────
+node_modules/
+.yarn/cache
+.yarn/unplugged
+.yarn/build-state.yml
+.yarn/install-state.gz
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── TypeScript build info ─────────────────────────────────────────────────────
+*.tsbuildinfo
+
+# ── Next.js ───────────────────────────────────────────────────────────────────
+frontend/.next/
+frontend/out/
+frontend/.vercel
+frontend/.turbo
+frontend/node_modules/
+
+# ── Electron build output ─────────────────────────────────────────────────────
+dist/
+release/
+
+# ── Python / Backend ──────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+.eggs/
+dist-python/
+
+# ── Backend storage (runtime data, not source) ────────────────────────────────
+backend/storage/exports/
+backend/storage/media/
+backend/storage/projects/
+backend/storage/temp/
+
+# ── Test artifacts ────────────────────────────────────────────────────────────
+.playwright-mcp/
+test-results/
+playwright-report/
+coverage/
+.nyc_output/
+
+# ── Env / secrets ─────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
