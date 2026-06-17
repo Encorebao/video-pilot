@@ -54,9 +54,12 @@ frontend/public/media/*
 
 # ── Private editor plugin experiments (split into a separate repo later) ─────
 resolve-plugin/
-doc/davinci/
 backend/app/api/resolve.py
 backend/tests/test_resolve_api.py
+
+# ── Local planning notes (not part of the public repo) ────────────────────────
+doc/
+docs/
 
 # ── Test artifacts ────────────────────────────────────────────────────────────
 .playwright-mcp/

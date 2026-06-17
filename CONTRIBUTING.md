@@ -8,7 +8,7 @@ Video Pilot is built through pull requests and maintainer review. Direct pushes 
 2. Create a branch:
    - `feature/<short-name>`
    - `fix/<short-name>`
-   - `docs/<short-name>`
+   - `documentation/<short-name>`
    - `chore/<short-name>`
 3. Make focused changes.
 4. Run the relevant checks.
