@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 
-export type WorkspacePanel = "media" | "voice";
+export type WorkspacePanel = "media" | "voice" | "sceneGroups";
 export type InspectorTab = "inspector" | "skills" | "chat";
 
 interface UIStoreState {
@@ -10,6 +10,10 @@ interface UIStoreState {
   analyzingIds: Set<string>;
   /** IDs of media items that have been analyzed */
   analyzedIds: Set<string>;
+  beginAnalysis: (ids: string[]) => void;
+  completeAnalysis: (ids: string[]) => void;
+  failAnalysis: (ids: string[]) => void;
+  removeAnalysisState: (ids: string[]) => void;
   analyzeItem: (id: string) => void;
   /** Active tab in the AI panel (legacy, kept for compat) */
   aiTab: "skills" | "chat";
@@ -31,17 +35,38 @@ export const useUIStore = create<UIStoreState>((set, get) => ({
   setActivePanel: (panel) => set({ activePanel: panel }),
   inspectorTab: "inspector",
   setInspectorTab: (tab) => set({ inspectorTab: tab }),
-  analyzeItem: (id) => {
-    const { analyzingIds } = get();
-    if (analyzingIds.has(id)) return;
-    set((s) => ({ analyzingIds: new Set(s.analyzingIds).add(id) }));
-    const delay = 1400 + Math.random() * 800;
-    setTimeout(() => {
-      set((s) => {
-        const next = new Set(s.analyzingIds);
-        next.delete(id);
-        return { analyzingIds: next, analyzedIds: new Set(s.analyzedIds).add(id) };
-      });
-    }, delay);
+  beginAnalysis: (ids) => {
+    set((s) => ({
+      analyzingIds: new Set([...s.analyzingIds, ...ids]),
+    }));
   },
+  completeAnalysis: (ids) => {
+    set((s) => {
+      const analyzingIds = new Set(s.analyzingIds);
+      ids.forEach((id) => analyzingIds.delete(id));
+      return {
+        analyzingIds,
+        analyzedIds: new Set([...s.analyzedIds, ...ids]),
+      };
+    });
+  },
+  failAnalysis: (ids) => {
+    set((s) => {
+      const analyzingIds = new Set(s.analyzingIds);
+      ids.forEach((id) => analyzingIds.delete(id));
+      return { analyzingIds };
+    });
+  },
+  removeAnalysisState: (ids) => {
+    set((s) => {
+      const analyzingIds = new Set(s.analyzingIds);
+      const analyzedIds = new Set(s.analyzedIds);
+      ids.forEach((id) => {
+        analyzingIds.delete(id);
+        analyzedIds.delete(id);
+      });
+      return { analyzingIds, analyzedIds };
+    });
+  },
+  analyzeItem: (id) => get().beginAnalysis([id]),
 }));

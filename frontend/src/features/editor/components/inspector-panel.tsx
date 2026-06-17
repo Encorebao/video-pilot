@@ -1,9 +1,5 @@
 "use client";
 
-import Link from "next/link";
-import { Download } from "lucide-react";
-
-import { useExportStore } from "@/stores/export-store";
 import { useProjectStore } from "@/stores/project-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import { useTimelineStore } from "@/stores/timeline-store";
@@ -12,6 +8,7 @@ import { SectionLabel, Row } from "@/components/shared/panel-primitives";
 
 const PANEL_LABELS: Record<WorkspacePanel, string> = {
   media: "库",
+  sceneGroups: "场景分组",
   voice: "旁白",
 };
 
@@ -36,12 +33,22 @@ function fmtFileSize(bytes?: number): string {
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
-export function InspectorPanel({ onQuickExport }: { onQuickExport: () => void }) {
+function getPlaybackCompatibility(name: string): string | null {
+  const extension = name.split(".").pop()?.toLowerCase();
+  if (extension === "mov") {
+    return "MOV 取决于编码";
+  }
+  if (extension === "mp4") {
+    return "MP4 最稳";
+  }
+  return null;
+}
+
+export function InspectorPanel() {
   const project = useProjectStore((s) => s.currentProject);
   const selectedClipId = useTimelineStore((s) => s.selectedClipId);
   const selectedTrackId = useTimelineStore((s) => s.selectedTrackId);
   const previewMediaId = useTimelineStore((s) => s.previewMediaId);
-  const exportTasks = useExportStore((s) => s.tasks);
   const modelConfigs = useSettingsStore((s) => s.modelConfigs);
   const activePanel = useUIStore((s) => s.activePanel);
 
@@ -54,7 +61,6 @@ export function InspectorPanel({ onQuickExport }: { onQuickExport: () => void })
     ? (project.mediaItems.find((m) => m.id === previewMediaId) ?? null)
     : null;
   const readyModelCount = modelConfigs.filter((m) => m.status === "ready").length;
-  const queuedExportCount = exportTasks.filter((t) => t.status !== "completed").length;
 
   const showMedia = !!previewMedia;
   const showClip = !showMedia && !!selectedClip;
@@ -81,6 +87,9 @@ export function InspectorPanel({ onQuickExport }: { onQuickExport: () => void })
               value={formatCreatedAt(previewMedia.updatedAt ?? previewMedia.createdAt)}
             />
             <Row label="文件大小" value={fmtFileSize(previewMedia.fileSize)} />
+            {previewMedia.type === "video" ? (
+              <Row label="播放兼容" value={getPlaybackCompatibility(previewMedia.name) ?? "取决于浏览器"} />
+            ) : null}
             {previewMedia.projectPath && (
               <div className="mx-3 mt-1 break-all rounded-[6px] bg-white/[0.04] px-2 py-1.5 text-[11px] text-white/25">
                 {previewMedia.projectPath}
@@ -123,24 +132,7 @@ export function InspectorPanel({ onQuickExport }: { onQuickExport: () => void })
         <SectionLabel>状态</SectionLabel>
         <Row label="面板" value={PANEL_LABELS[activePanel]} />
         <Row label="模型就绪" value={readyModelCount} />
-        <Row label="导出排队" value={queuedExportCount} />
-      </div>
-
-      <div className="shrink-0 border-t border-white/[0.08]">
-        <button
-          type="button"
-          onClick={onQuickExport}
-          className="flex w-full items-center gap-2 border-b border-white/[0.06] px-3 py-2 text-[13px] text-white/60 transition-colors hover:bg-white/[0.06] hover:text-white/80"
-        >
-          <Download className="size-3" />
-          导出序列
-        </button>
-        <Link
-          href="/"
-          className="flex w-full items-center px-3 py-2 text-[13px] text-white/30 transition-colors hover:bg-white/[0.04] hover:text-white/50"
-        >
-          ← 返回主页
-        </Link>
+        <Row label="素材数量" value={project.mediaItems.length} />
       </div>
     </div>
   );

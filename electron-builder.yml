@@ -1,5 +1,5 @@
-appId: com.video-studio.app
-productName: Video Studio
+appId: com.video-pilot.app
+productName: Video Pilot
 copyright: Copyright © 2025
 
 directories:
@@ -28,7 +28,7 @@ mac:
         - x64
 
 dmg:
-  title: Video Studio
+  title: Video Pilot
 
 win:
   target:

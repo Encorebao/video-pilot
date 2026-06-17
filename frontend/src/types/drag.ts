@@ -22,6 +22,14 @@ export type DragPayload =
       durationSec: number;
       sourceType: Extract<TimelineClip["sourceType"], "recording" | "tts">;
       trackKind: "audio";
+    }
+  | {
+      kind: "compound";
+      timelineId: string;
+      name: string;
+      durationInFrames: number;
+      sourceType: Extract<TimelineClip["sourceType"], "compound">;
+      trackKind: "video";
     };
 
 export const DRAG_MIME = "application/x-vs-clip";

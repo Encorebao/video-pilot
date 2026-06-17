@@ -10,6 +10,7 @@ import {
   type VoiceHistoryFilter,
 } from "@/stores/voice-store";
 import { useDragStore } from "@/stores/drag-store";
+import { useProjectStore } from "@/stores/project-store";
 import { DRAG_MIME, type DragPayload } from "@/types/drag";
 
 const SPEED_OPTIONS = ["0.5", "0.75", "1.0", "1.25", "1.5", "1.75", "2.0"] as const;
@@ -38,11 +39,15 @@ export function VoiceSidePanel() {
   const setTonePrompt = useVoiceStore((s) => s.setTonePrompt);
   const speed = useVoiceStore((s) => s.speed);
   const setSpeed = useVoiceStore((s) => s.setSpeed);
+  const currentProject = useProjectStore((s) => s.currentProject);
+  const jobs = useProjectStore((s) => s.jobs);
+  const startTtsJob = useProjectStore((s) => s.startTtsJob);
 
   // ── Local ephemeral state ────────────────────────────────────────────────
   const [recordingState, setRecordingState] = useState<"idle" | "recording">("idle");
   const [volBars, setVolBars] = useState<number[]>(Array(20).fill(0.08));
   const volTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ttsIdCounterRef = useRef(0);
 
   function startRecording() {
     setRecordingState("recording");
@@ -71,24 +76,37 @@ export function VoiceSidePanel() {
     });
   }
 
-  function generateTts() {
-    if (!ttsText.trim()) return;
-    const truncated = ttsText.slice(0, 22) + (ttsText.length > 22 ? "…" : "");
-    const newId = `tts-${Date.now()}`;
-    const textLen = ttsText.length;
+  async function generateTts() {
+    const text = ttsText.trim();
+    if (!text || !currentProject) return;
+    const truncated = text.slice(0, 22) + (text.length > 22 ? "…" : "");
+    ttsIdCounterRef.current += 1;
+    const newId = `tts-local-${ttsIdCounterRef.current}`;
+    const selectedVoice = recordingVoices.find((voice) => voice.id === selectedVoiceId);
     addToHistory({
       id: newId,
       type: "tts",
       name: truncated,
-      text: ttsText,
+      text,
       status: "generating",
       createdAt: new Date().toISOString(),
       speed: parseFloat(speed),
     });
     setTtsText("");
-    setTimeout(() => {
-      updateHistoryItem(newId, { status: "done", durationSec: textLen / 10 });
-    }, 2500);
+    const job = await startTtsJob({
+      text,
+      voice: selectedVoiceId || "alloy",
+      voiceName: selectedVoice?.name ?? "alloy",
+      emotion: tonePrompt || "neutral",
+      speed: parseFloat(speed),
+      insertionTrackId: currentProject.timeline.audioTracks[0]?.id,
+      sampleSource: selectedVoiceId ? "recorded" : "uploaded",
+    });
+    if (!job) {
+      updateHistoryItem(newId, { status: "failed" });
+      return;
+    }
+    updateHistoryItem(newId, { id: job.id });
   }
 
   useEffect(() => {
@@ -96,6 +114,25 @@ export function VoiceSidePanel() {
       if (volTimerRef.current) clearInterval(volTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    for (const item of history) {
+      if (item.type !== "tts" || item.status !== "generating") continue;
+      const job = jobs[item.id];
+      if (!job) continue;
+      if (job.status === "completed") {
+        const mediaItem = job.result.mediaItem as { durationInFrames?: number } | undefined;
+        const fps = currentProject?.timeline.fps ?? 30;
+        updateHistoryItem(item.id, {
+          status: "done",
+          durationSec: mediaItem?.durationInFrames ? mediaItem.durationInFrames / fps : undefined,
+        });
+      }
+      if (job.status === "failed") {
+        updateHistoryItem(item.id, { status: "failed" });
+      }
+    }
+  }, [currentProject?.timeline.fps, history, jobs, updateHistoryItem]);
 
   const recordingVoices = history.filter(
     (h) => h.type === "recording" && h.status === "done",
@@ -152,7 +189,6 @@ export function VoiceSidePanel() {
             <div className="flex h-10 items-end gap-[2px] rounded-[8px] border border-white/[0.07] bg-white/[0.03] px-3 py-2">
               {volBars.map((level, i) => (
                 <div
-                  // eslint-disable-next-line react/no-array-index-key
                   key={i}
                   className={`w-full rounded-full transition-all duration-75 ${
                     recordingState === "recording" ? "bg-violet-400/70" : "bg-white/15"
@@ -232,7 +268,7 @@ export function VoiceSidePanel() {
               </select>
               <button
                 type="button"
-                disabled={!ttsText.trim()}
+                disabled={!ttsText.trim() || !currentProject}
                 onClick={generateTts}
                 className="flex flex-1 items-center justify-center gap-1.5 rounded-[8px] border border-amber-500/20 bg-amber-500/[0.12] py-1.5 text-[12px] font-medium text-amber-400/80 transition-colors hover:bg-amber-500/[0.2] hover:text-amber-300/90 disabled:pointer-events-none disabled:opacity-30"
               >
@@ -244,7 +280,7 @@ export function VoiceSidePanel() {
         )}
       </div>
 
-      {/* ── History list ─────────────────────────────────────────────── */}
+      {/* ── Audio list ───────────────────────────────────────────────── */}
       <div className="flex min-h-0 flex-1 flex-col">
         {/* Filter */}
         <div className="flex shrink-0 items-center gap-0 border-b border-white/[0.06] px-2 py-1">
@@ -268,7 +304,7 @@ export function VoiceSidePanel() {
         {/* Items */}
         <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1.5">
           {filteredHistory.length === 0 && (
-            <div className="py-6 text-center text-[11px] text-white/20">暂无历史音频</div>
+            <div className="py-6 text-center text-[11px] text-white/20">暂无音频</div>
           )}
           <div className="flex flex-col gap-1">
             {filteredHistory.map((item: VoiceHistoryItem) => {
@@ -327,6 +363,8 @@ export function VoiceSidePanel() {
                         <span className="flex items-center gap-1 text-amber-400/60">
                           <Loader2 className="size-2.5 animate-spin" /> 生成中…
                         </span>
+                      ) : item.status === "failed" ? (
+                        <span className="text-red-400/70">生成失败</span>
                       ) : (
                         <>
                           {fmtSec(item.durationSec)}

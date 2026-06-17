@@ -31,7 +31,6 @@ type DaVinciFormat = (typeof DAVINCI_FORMATS)[number];
 // ── Sub-components ────────────────────────────────────────────────────────
 
 function TargetCard({
-  id,
   icon,
   title,
   desc,

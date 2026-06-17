@@ -2,14 +2,27 @@
 
 import type { PlayerRef } from "@remotion/player";
 import { useCallback, useEffect, useRef, useState, type PointerEvent as RPointerEvent } from "react";
-import { ChevronFirst, ChevronLast, Minus, Plus, Play, Scissors, SearchIcon, Trash2 } from "lucide-react";
+import {
+  ChevronFirst,
+  ChevronLast,
+  Link2Off,
+  Minus,
+  Plus,
+  Play,
+  Scissors,
+  SearchIcon,
+  Trash2,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
+import { resolveRippleInsertStart } from "@/features/timeline/lib/clip-placement";
+import { getTimelineClipAudioUrl } from "@/features/timeline/lib/timeline-media";
+import { getMediaStatus } from "@/services/media-api";
 import { useProjectStore } from "@/stores/project-store";
 import { useTimelineStore } from "@/stores/timeline-store";
 import { useDragStore } from "@/stores/drag-store";
 import type { ProjectRecord, TimelineClip } from "@/types/project";
-import { DRAG_MIME } from "@/types/drag";
+import { DRAG_MIME, type DragPayload } from "@/types/drag";
 
 // ─── Layout constants ──────────────────────────────────────────────────────────
 const RULER_H = 22;   // px — ruler bar height
@@ -27,6 +40,7 @@ const CLIP_STYLE: Record<TimelineClip["sourceType"], string> = {
   tts: "border-purple-500/40 bg-purple-500/20 text-purple-200/80",
   recording: "border-white/[0.1] bg-white/[0.05] text-white/50",
   music: "border-emerald-500/35 bg-emerald-500/[0.16] text-emerald-200/70",
+  compound: "border-emerald-400/45 bg-emerald-500/20 text-emerald-100/85",
 };
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -66,6 +80,24 @@ function snap(frame: number, snapFrames: number[], ppf: number): number {
     }
   }
   return best;
+}
+
+function hasClipDragType(types: readonly string[]): boolean {
+  return types.includes(DRAG_MIME);
+}
+
+function readDragPayload(
+  event: React.DragEvent<HTMLDivElement>,
+  fallback: DragPayload | null,
+): DragPayload | null {
+  const raw = event.dataTransfer.getData(DRAG_MIME);
+  if (!raw) return fallback;
+
+  try {
+    return JSON.parse(raw) as DragPayload;
+  } catch {
+    return fallback;
+  }
 }
 
 // ─── Ruler ─────────────────────────────────────────────────────────────────────
@@ -201,16 +233,58 @@ function Playhead({
 // ─── Waveform ─────────────────────────────────────────────────────────────────
 const WAVEFORM_SAMPLES = 600;
 const waveformCache = new Map<string, number[]>();
+const mediaAvailabilityCache = new Map<string, boolean>();
+
+function useMediaAvailable(folderPath: string, mediaId: string): boolean | null {
+  const cacheKey = mediaId ? `${folderPath}::${mediaId}` : `${folderPath}::__compound__`;
+  const [availableByKey, setAvailableByKey] = useState<{
+    key: string;
+    value: boolean | null;
+  }>(() => ({
+    key: cacheKey,
+    value: mediaId ? (mediaAvailabilityCache.get(cacheKey) ?? null) : true,
+  }));
+  const available =
+    !mediaId
+      ? true
+      : availableByKey.key === cacheKey
+        ? availableByKey.value
+        : mediaAvailabilityCache.get(cacheKey) ?? null;
+
+  useEffect(() => {
+    if (!mediaId) {
+      return;
+    }
+    if (mediaAvailabilityCache.has(cacheKey)) return;
+    let cancelled = false;
+    void getMediaStatus(folderPath, mediaId)
+      .then((status) => {
+        mediaAvailabilityCache.set(cacheKey, status.exists);
+        if (!cancelled) setAvailableByKey({ key: cacheKey, value: status.exists });
+      })
+      .catch(() => {
+        mediaAvailabilityCache.set(cacheKey, false);
+        if (!cancelled) setAvailableByKey({ key: cacheKey, value: false });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [cacheKey, folderPath, mediaId]);
+
+  return available;
+}
 
 function useWaveformData(src: string | null): number[] | null {
-  const [data, setData] = useState<number[] | null>(() =>
-    src ? (waveformCache.get(src) ?? null) : null,
-  );
+  const [loadedData, setLoadedData] = useState<{
+    src: string;
+    data: number[];
+  } | null>(null);
+  const cachedData = src ? (waveformCache.get(src) ?? null) : null;
+  const data = cachedData ?? (loadedData?.src === src ? loadedData.data : null);
 
   useEffect(() => {
     if (!src) return;
     if (waveformCache.has(src)) {
-      setData(waveformCache.get(src)!);
       return;
     }
     let cancelled = false;
@@ -222,9 +296,10 @@ function useWaveformData(src: string | null): number[] | null {
         const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
         await ctx.close();
         const channelData = audioBuffer.getChannelData(0);
-        const blockSize = Math.floor(channelData.length / WAVEFORM_SAMPLES);
+        const sampleCount = Math.min(WAVEFORM_SAMPLES, Math.max(channelData.length, 1));
+        const blockSize = Math.max(1, Math.floor(channelData.length / sampleCount));
         const result: number[] = [];
-        for (let i = 0; i < WAVEFORM_SAMPLES; i++) {
+        for (let i = 0; i < sampleCount; i++) {
           let sum = 0;
           const start = i * blockSize;
           for (let j = start; j < start + blockSize; j++) {
@@ -236,7 +311,7 @@ function useWaveformData(src: string | null): number[] | null {
         const normalised = result.map((v) => v / max);
         if (!cancelled) {
           waveformCache.set(src, normalised);
-          setData(normalised);
+          setLoadedData({ src, data: normalised });
         }
       } catch {
         // leave null — skeleton stays visible
@@ -352,16 +427,24 @@ function ClipBlock({
   const moveClip = useProjectStore((s) => s.moveClip);
   const trimClipStart = useProjectStore((s) => s.trimClipStart);
   const trimClipEnd = useProjectStore((s) => s.trimClipEnd);
+  const setActiveTimelineId = useProjectStore((s) => s.setActiveTimelineId);
 
   const [hoverHandle, setHoverHandle] = useState<"left" | "right" | null>(null);
   const isSelected = selectedClipId === clip.id && selectedTrackId === trackId;
-  const isAudio = clip.sourceType !== "imported-video";
   const left = Math.round(clip.startFrame * ppf);
   const width = Math.max(6, Math.round(clip.durationInFrames * ppf));
 
   const mediaItem = project.mediaItems.find((m) => m.id === clip.mediaId);
-  // Both audio and video clips carry audio — Web Audio API can decode video files directly.
-  const audioSrc = mediaItem?.projectPath ? `/${mediaItem.projectPath}` : null;
+  const nestedTimeline = clip.timelineId
+    ? project.timelines.find((timeline) => timeline.id === clip.timelineId)
+    : null;
+  // Both audio and video clips can carry audio; read through the backend stream so copied
+  // and referenced files resolve the same way.
+  const mediaAvailable = useMediaAvailable(project.location, clip.mediaId);
+  const isCompoundClip = clip.sourceType === "compound";
+  const isMissingMedia = isCompoundClip ? !nestedTimeline : !mediaItem || mediaAvailable === false;
+  const shouldRenderWaveform = mediaItem?.type === "audio" || mediaItem?.type === "generated-audio";
+  const audioSrc = shouldRenderWaveform && mediaAvailable ? getTimelineClipAudioUrl(project, clip.mediaId) : null;
   const mediaDuration = mediaItem?.durationInFrames ?? clip.durationInFrames;
 
   // ── Drag body (move) ────────────────────────────────────────────────────────
@@ -465,8 +548,15 @@ function ClipBlock({
         "absolute inset-y-1 select-none overflow-hidden border",
         CLIP_STYLE[clip.sourceType],
         isSelected ? "z-10 border-white/55 ring-1 ring-white/25" : "z-0",
+        isMissingMedia && "border-red-400/70 bg-red-500/[0.18] text-red-100/85 ring-1 ring-red-400/25",
       )}
       style={{ left, width }}
+      title={isCompoundClip ? `${clip.title} · 双击编辑复合片段` : isMissingMedia ? `${clip.title} · 素材链接丢失` : clip.title}
+      onDoubleClick={(event) => {
+        if (!clip.timelineId) return;
+        event.stopPropagation();
+        setActiveTimelineId(clip.timelineId);
+      }}
     >
       {/* Left trim handle */}
       <div
@@ -496,6 +586,12 @@ function ClipBlock({
           clipDuration={clip.durationInFrames}
           mediaDuration={mediaDuration}
         />
+        {isMissingMedia ? (
+          <span className="absolute left-1 top-1 flex max-w-[calc(100%-8px)] items-center gap-1 rounded-[4px] bg-red-950/80 px-1.5 py-0.5 text-[9px] leading-none text-red-100 shadow-sm shadow-black/30">
+            <Link2Off className="size-2.5 shrink-0" />
+            <span className="truncate">素材链接丢失</span>
+          </span>
+        ) : null}
         <span className="absolute bottom-0.5 left-1 right-1 block truncate text-[10px] leading-none opacity-70">
           {clip.title}
         </span>
@@ -537,6 +633,12 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
   const selectClip = useTimelineStore((s) => s.selectClip);
   const deleteClip = useProjectStore((s) => s.deleteClip);
   const splitClip = useProjectStore((s) => s.splitClip);
+  const createTimeline = useProjectStore((s) => s.createTimeline);
+  const createProjectTimeline = useProjectStore((s) => s.createProjectTimeline);
+  const setActiveTimelineId = useProjectStore((s) => s.setActiveTimelineId);
+  const deleteCompoundTimeline = useProjectStore((s) => s.deleteCompoundTimeline);
+  const addTimelineTrack = useProjectStore((s) => s.addTimelineTrack);
+  const deleteTimelineTrack = useProjectStore((s) => s.deleteTimelineTrack);
   const insertDroppedClip = useProjectStore((s) => s.insertDroppedClip);
   const dragPayload = useDragStore((s) => s.payload);
 
@@ -549,12 +651,21 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
     durationInFrames: number;
     sourceType: TimelineClip["sourceType"];
   } | null>(null);
+  const [trackMenu, setTrackMenu] = useState<{
+    trackId: string;
+    trackName: string;
+    x: number;
+    y: number;
+  } | null>(null);
 
   // Which track ids belong to video tracks (for type-checking drops)
   const videoTrackIds = new Set(project.timeline.videoTracks.map((t) => t.id));
 
   const { fps, durationInFrames } = project.timeline;
   const tracks = [...project.timeline.videoTracks, ...project.timeline.audioTracks];
+  const hasTracks = tracks.length > 0;
+  const activeTimeline = project.timeline;
+  const activeIsCompound = activeTimeline.kind === "compound";
   const ppf = BASE_PPF * zoomLevel;
   const totalWidth = Math.max(600, durationInFrames * ppf + 80);
   const totalHeight = RULER_H + tracks.length * TRACK_H;
@@ -576,6 +687,25 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
     }
   };
 
+  useEffect(() => {
+    if (!trackMenu) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setTrackMenu(null);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [trackMenu]);
+
+  function handleDeleteTrack(trackId: string) {
+    deleteTimelineTrack(trackId);
+    if (selectedTrackId === trackId) {
+      selectClip(null, null);
+    }
+    setTrackMenu(null);
+  }
+
   return (
     <div
       className="flex h-full flex-col bg-[#111] text-sm text-white select-none"
@@ -585,6 +715,73 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
       <div className="flex h-8 shrink-0 items-center border-b border-white/[0.06] bg-[#0e0e0e] px-2 text-xs">
         {/* Left — edit actions */}
         <div className="flex items-center gap-0.5">
+          <div className="mr-1 flex items-center gap-1 border-r border-white/[0.06] pr-1.5">
+            <select
+              value={project.activeTimelineId}
+              onChange={(event) => setActiveTimelineId(event.target.value)}
+              className="h-6 max-w-[180px] rounded-[6px] border border-white/[0.08] bg-white/[0.035] px-2 text-[11px] text-white/65 outline-none transition-colors hover:border-white/[0.14] focus:border-white/[0.18]"
+              title="切换时间轴"
+            >
+              {project.timelines.map((timeline) => (
+                <option key={timeline.id} value={timeline.id} className="bg-[#171717] text-white">
+                  {timeline.kind === "main" ? "主轴" : "复合"} · {timeline.name}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={() => createProjectTimeline("main")}
+              className="flex h-6 items-center gap-1 rounded-[6px] px-1.5 text-[11px] text-white/42 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+              title="新建主轴"
+            >
+              <Plus className="size-3" />
+              <span>主轴</span>
+            </button>
+            {activeIsCompound ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (!window.confirm(`删除复合片段「${activeTimeline.name}」？所有引用它的片段会一起移除。`)) {
+                    return;
+                  }
+                  deleteCompoundTimeline(activeTimeline.id);
+                }}
+                className="flex h-6 items-center gap-1 rounded-[6px] px-1.5 text-[11px] text-red-200/55 transition-colors hover:bg-red-400/[0.08] hover:text-red-100/80"
+                title="删除当前复合片段"
+              >
+                <Trash2 className="size-3" />
+                <span>复合</span>
+              </button>
+            ) : null}
+          </div>
+          {!hasTracks && (
+            <button
+              type="button"
+              onClick={createTimeline}
+              className="flex items-center gap-1.5 px-2 py-1 text-white/55 transition-colors hover:bg-white/[0.06] hover:text-white/85"
+            >
+              <Plus className="size-3" />
+              <span>创建时间轴</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => addTimelineTrack("video")}
+            className="flex items-center gap-1.5 px-2 py-1 text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/75"
+            title="新建视频轨"
+          >
+            <Plus className="size-3" />
+            <span>视频轨</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => addTimelineTrack("audio")}
+            className="flex items-center gap-1.5 px-2 py-1 text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/75"
+            title="新建音频轨"
+          >
+            <Plus className="size-3" />
+            <span>音频轨</span>
+          </button>
           <button
             type="button"
             disabled={!selectedClipId}
@@ -678,6 +875,21 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
       </div>
 
       {/* ── Track area ── */}
+      {!hasTracks ? (
+        <div className="flex min-h-0 flex-1 items-center justify-center border-t border-white/[0.04] bg-[#0f0f0f]">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <div className="text-[12px] text-white/35">还没有时间轴</div>
+            <button
+              type="button"
+              onClick={createTimeline}
+              className="flex items-center gap-1.5 rounded-[6px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[12px] text-white/70 transition-colors hover:border-white/[0.18] hover:bg-white/[0.1] hover:text-white"
+            >
+              <Plus className="size-3.5" />
+              <span>创建时间轴</span>
+            </button>
+          </div>
+        </div>
+      ) : (
       <div className="flex min-h-0 flex-1 overflow-hidden">
         {/* Fixed track-name column */}
         <div
@@ -687,6 +899,15 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
           {tracks.map((track) => (
             <div
               key={track.id}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setTrackMenu({
+                  trackId: track.id,
+                  trackName: track.name,
+                  x: event.clientX,
+                  y: event.clientY,
+                });
+              }}
               className="flex shrink-0 items-center justify-between border-b border-white/[0.04] bg-[#141414] px-2"
               style={{ height: TRACK_H }}
             >
@@ -726,11 +947,12 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
                 dragPayload !== null && dragPayload.trackKind === trackKind;
 
               function handleDragOver(e: React.DragEvent<HTMLDivElement>) {
-                if (!dragPayload) return;
-                if (dragPayload.trackKind !== trackKind) return; // wrong track type
-                if (!e.dataTransfer.types.includes(DRAG_MIME)) return;
+                if (!dragPayload && !hasClipDragType(e.dataTransfer.types)) return;
+                if (dragPayload && dragPayload.trackKind !== trackKind) return; // wrong track type
                 e.preventDefault();
                 e.dataTransfer.dropEffect = "copy";
+
+                if (!dragPayload) return;
 
                 // Compute frame position from cursor
                 const containerRect = scrollRef.current!.getBoundingClientRect();
@@ -738,14 +960,15 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
                   e.clientX - containerRect.left + (scrollRef.current?.scrollLeft ?? 0);
                 const rawFrame = Math.max(0, Math.round(x / ppf));
                 const snapFrames = getSnapFrames(project, "");
-                const startFrame = snap(rawFrame, snapFrames, ppf);
+                const snappedStartFrame = snap(rawFrame, snapFrames, ppf);
 
                 const ghostDuration =
-                  dragPayload.kind === "media"
+                  dragPayload.kind === "media" || dragPayload.kind === "compound"
                     ? dragPayload.durationInFrames > 0
                       ? dragPayload.durationInFrames
                       : fps * 3
                     : Math.max(1, Math.round(dragPayload.durationSec * fps));
+                const startFrame = resolveRippleInsertStart(track.clips, snappedStartFrame);
 
                 setDropPreview((prev) => {
                   if (
@@ -771,9 +994,7 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
               function handleDrop(e: React.DragEvent<HTMLDivElement>) {
                 e.preventDefault();
                 setDropPreview(null);
-                const raw = e.dataTransfer.getData(DRAG_MIME);
-                if (!raw) return;
-                const payload = JSON.parse(raw) as typeof dragPayload;
+                const payload = readDragPayload(e, dragPayload);
                 if (!payload || payload.trackKind !== trackKind) return;
 
                 const containerRect = scrollRef.current!.getBoundingClientRect();
@@ -781,7 +1002,8 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
                   e.clientX - containerRect.left + (scrollRef.current?.scrollLeft ?? 0);
                 const rawFrame = Math.max(0, Math.round(x / ppf));
                 const snapFrames = getSnapFrames(project, "");
-                const startFrame = snap(rawFrame, snapFrames, ppf);
+                const snappedStartFrame = snap(rawFrame, snapFrames, ppf);
+                const startFrame = resolveRippleInsertStart(track.clips, snappedStartFrame);
 
                 insertDroppedClip({ trackId: track.id, startFrame, payload, fps });
               }
@@ -843,6 +1065,33 @@ export function TimelinePanel({ project, playerRef }: TimelinePanelProps) {
           </div>
         </div>
       </div>
+      )}
+      {trackMenu ? (
+        <>
+          <button
+            type="button"
+            aria-label="关闭轨道菜单"
+            className="fixed inset-0 z-40 cursor-default bg-transparent"
+            onClick={() => setTrackMenu(null)}
+          />
+          <div
+            className="fixed z-50 min-w-36 overflow-hidden rounded-[7px] border border-white/[0.12] bg-[#181818] py-1 shadow-xl shadow-black/40"
+            style={{ left: trackMenu.x, top: trackMenu.y }}
+          >
+            <div className="border-b border-white/[0.06] px-2 py-1.5 text-[10px] text-white/32">
+              {trackMenu.trackName}
+            </div>
+            <button
+              type="button"
+              onClick={() => handleDeleteTrack(trackMenu.trackId)}
+              className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-[12px] text-red-200/70 transition-colors hover:bg-red-500/[0.12] hover:text-red-100"
+            >
+              <Trash2 className="size-3.5" />
+              <span>删除轨道</span>
+            </button>
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

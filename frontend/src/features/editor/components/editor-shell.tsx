@@ -1,20 +1,33 @@
 "use client";
 
 import Link from "next/link";
-import { Clapperboard, Download, FolderOpen, Loader2, Mic2, Settings2, Sparkles } from "lucide-react";
+import {
+  Clapperboard,
+  FileDown,
+  FolderOpen,
+  FolderTree,
+  Loader2,
+  Mic2,
+  Settings2,
+  Sparkles,
+} from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlayerRef } from "@remotion/player";
 
 import { PreviewPanel } from "@/features/editor/components/preview-panel";
 import { TimelinePanel } from "@/features/timeline/components/timeline-panel";
 import { InspectorPanel } from "@/features/editor/components/inspector-panel";
+import { SegmentPanel } from "@/features/editor/components/segment-panel";
 import { MediaSidePanel } from "@/features/media/components/media-side-panel";
 import { VoiceSidePanel } from "@/features/audio/components/voice-side-panel";
-import { AISidePanel } from "@/features/ai/components/ai-side-panel";
-import { ExportModal } from "@/features/export/components/export-modal";
+import { SceneGroupsPanel } from "@/features/scene-groups/components/scene-groups-panel";
+import { ClipAnalysisPanel } from "@/features/analysis/components/clip-analysis-panel";
+import { SubtitlePanel } from "@/features/subtitles/components/subtitle-panel";
+import { ScriptEditPanel } from "@/features/script-edit/components/script-edit-panel";
 
 import { useProjectStore } from "@/stores/project-store";
 import { useUIStore, type WorkspacePanel } from "@/stores/ui-store";
+import { useDragStore } from "@/stores/drag-store";
 
 import { PanelHeader } from "@/components/shared/panel-header";
 
@@ -26,6 +39,7 @@ const panelMeta: Array<{
   icon: typeof FolderOpen;
 }> = [
   { id: "media", label: "库", icon: FolderOpen },
+  { id: "sceneGroups", label: "场景", icon: FolderTree },
   { id: "voice", label: "旁白", icon: Mic2 },
 ];
 
@@ -38,8 +52,13 @@ function SidePanel() {
   if (!project) return null;
 
   return (
-    <div className={`text-sm ${activePanel === "voice" ? "flex h-full flex-col" : ""}`}>
+    <div
+      className={`text-sm ${
+        activePanel === "voice" || activePanel === "sceneGroups" ? "flex h-full flex-col" : ""
+      }`}
+    >
       {activePanel === "media" && <MediaSidePanel fps={project.timeline.fps} />}
+      {activePanel === "sceneGroups" && <SceneGroupsPanel />}
       {activePanel === "voice" && <VoiceSidePanel />}
     </div>
   );
@@ -49,29 +68,40 @@ function SidePanel() {
 
 export function EditorShell() {
   const project = useProjectStore((s) => s.currentProject);
-  const [showExportModal, setShowExportModal] = useState(false);
+  const loadLastOpenProject = useProjectStore((s) => s.loadLastOpenProject);
+  const startAnalysisJob = useProjectStore((s) => s.startAnalysisJob);
+  const startFcpxmlExportJob = useProjectStore((s) => s.startFcpxmlExportJob);
+  const isLoadingProject = useProjectStore((s) => s.isLoadingProject);
+  const projectError = useProjectStore((s) => s.projectError);
+  const jobs = useProjectStore((s) => s.jobs);
+  const latestExportJobId = useProjectStore((s) => s.latestExportJobId);
+  const [rightPanel, setRightPanel] = useState<"inspector" | "segment" | "subtitles" | "analysis">("inspector");
+  const [bottomMode, setBottomMode] = useState<"tracks" | "script">("tracks");
+  const [restoreAttempted, setRestoreAttempted] = useState(false);
 
   const activePanel = useUIStore((s) => s.activePanel);
   const setActivePanel = useUIStore((s) => s.setActivePanel);
-  const inspectorTab = useUIStore((s) => s.inspectorTab);
-  const setInspectorTab = useUIStore((s) => s.setInspectorTab);
   const analyzingIds = useUIStore((s) => s.analyzingIds);
-  const analyzeItem = useUIStore((s) => s.analyzeItem);
+  const dragPayload = useDragStore((s) => s.payload);
+  const clearDragPayload = useDragStore((s) => s.setPayload);
 
   const playerRef = useRef<PlayerRef>(null);
 
   // ── Resizable panels ─────────────────────────────────────────────────────
   const [sidePanelWidth, setSidePanelWidth] = useState(384);
-  const [inspectorWidth, setInspectorWidth] = useState(224);
+  const [inspectorWidth, setInspectorWidth] = useState(320);
   const [timelineHeight, setTimelineHeight] = useState(200);
   const [dragging, setDragging] = useState<"side" | "inspector" | "timeline" | null>(null);
 
   const sidePanelWidthRef = useRef(sidePanelWidth);
   const inspectorWidthRef = useRef(inspectorWidth);
   const timelineHeightRef = useRef(timelineHeight);
-  sidePanelWidthRef.current = sidePanelWidth;
-  inspectorWidthRef.current = inspectorWidth;
-  timelineHeightRef.current = timelineHeight;
+
+  useEffect(() => {
+    sidePanelWidthRef.current = sidePanelWidth;
+    inspectorWidthRef.current = inspectorWidth;
+    timelineHeightRef.current = timelineHeight;
+  }, [inspectorWidth, sidePanelWidth, timelineHeight]);
 
   useEffect(() => {
     const prev = document.body.style.overflow;
@@ -80,6 +110,34 @@ export function EditorShell() {
       document.body.style.overflow = prev;
     };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadLastOpenProject().finally(() => {
+      if (!cancelled) {
+        setRestoreAttempted(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadLastOpenProject]);
+
+  useEffect(() => {
+    if (dragPayload?.kind !== "media") return;
+
+    const handleDragEnd = (event: DragEvent) => {
+      if (event.dataTransfer?.dropEffect === "none") {
+        setActivePanel("media");
+      }
+      clearDragPayload(null);
+    };
+
+    window.addEventListener("dragend", handleDragEnd);
+    return () => {
+      window.removeEventListener("dragend", handleDragEnd);
+    };
+  }, [clearDragPayload, dragPayload?.kind, setActivePanel]);
 
   const startSidePanelDrag = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
@@ -104,7 +162,7 @@ export function EditorShell() {
     const startW = inspectorWidthRef.current;
     setDragging("inspector");
     const onMove = (ev: MouseEvent) => {
-      setInspectorWidth(Math.min(400, Math.max(120, startW + (startX - ev.clientX))));
+      setInspectorWidth(Math.min(520, Math.max(220, startW + (startX - ev.clientX))));
     };
     const onUp = () => {
       setDragging(null);
@@ -121,7 +179,7 @@ export function EditorShell() {
     const startH = timelineHeightRef.current;
     setDragging("timeline");
     const onMove = (ev: MouseEvent) => {
-      setTimelineHeight(Math.min(500, Math.max(80, startH + (startY - ev.clientY))));
+      setTimelineHeight(Math.min(720, Math.max(140, startH + (startY - ev.clientY))));
     };
     const onUp = () => {
       setDragging(null);
@@ -134,16 +192,48 @@ export function EditorShell() {
 
   function analyzeAll() {
     if (!project) return;
-    project.mediaItems.forEach((item) => analyzeItem(item.id));
+    void startAnalysisJob(project.mediaItems.map((item) => item.id));
   }
 
+  function exportFcpxml() {
+    void startFcpxmlExportJob();
+  }
+
+  const latestExportJob = latestExportJobId ? jobs[latestExportJobId] : null;
+  const isExporting = latestExportJob?.status === "queued" || latestExportJob?.status === "running";
+  const latestExportPath =
+    typeof latestExportJob?.result?.outputPath === "string"
+      ? latestExportJob.result.outputPath
+      : null;
+  const hasTimelineClips = project
+    ? [...project.timeline.videoTracks, ...project.timeline.audioTracks].some(
+        (track) => track.clips.length > 0,
+      )
+    : false;
+
   if (!project) {
+    const isRestoring = isLoadingProject || !restoreAttempted;
     return (
       <main className="flex h-screen items-center justify-center bg-[#111] text-white">
-        <div className="border border-white/10 p-6">
-          <p className="mb-4 text-sm text-white/50">没有项目会话</p>
-          <Link href="/" className="text-xs text-white/30 transition-colors hover:text-white/60">
-            ← 返回主页
+        <div className="w-[320px] rounded-[10px] border border-white/10 bg-white/[0.035] p-5">
+          <p className="text-sm font-medium text-white/70">
+            {isRestoring ? "正在打开项目..." : "没有打开的项目"}
+          </p>
+          <p className="mt-2 text-xs leading-5 text-white/35">
+            {isRestoring
+              ? "正在尝试恢复上次打开的项目。"
+              : "请从首页新建项目，或打开包含项目文件的文件夹。"}
+          </p>
+          {projectError ? (
+            <p className="mt-3 rounded-[6px] border border-amber-300/15 bg-amber-300/[0.05] px-2.5 py-2 text-xs leading-5 text-amber-100/55">
+              {projectError}
+            </p>
+          ) : null}
+          <Link
+            href="/"
+            className="mt-4 inline-flex h-8 items-center rounded-[6px] bg-white/[0.08] px-3 text-xs text-white/55 transition-colors hover:bg-white/[0.12] hover:text-white/80"
+          >
+            打开首页
           </Link>
         </div>
       </main>
@@ -151,7 +241,6 @@ export function EditorShell() {
   }
 
   return (
-    <>
     <main className="flex h-screen flex-col overflow-hidden bg-[#111] text-white">
       {/* Drag overlay — prevents iframe from stealing mouse */}
       {dragging && (
@@ -162,7 +251,7 @@ export function EditorShell() {
       )}
 
       {/* Titlebar */}
-      <div className="relative flex h-11 shrink-0 items-center border-b border-white/[0.08]">
+      <div className="electron-titlebar relative flex h-11 shrink-0 items-center border-b border-white/[0.08]">
         {/* macOS 交通灯占位：避让关闭/缩小/放大按钮 */}
         <div className="w-[80px] shrink-0" />
 
@@ -175,7 +264,7 @@ export function EditorShell() {
         </div>
 
         {/* 右侧操作区 */}
-        <div className="ml-auto flex items-center gap-2 pr-3 text-[12px] text-white/30">
+        <div className="electron-no-drag ml-auto flex items-center gap-2 pr-3 text-[12px] text-white/30">
           <span>
             {project.timeline.videoTracks.length}V&nbsp;
             {project.timeline.audioTracks.length}A
@@ -184,6 +273,28 @@ export function EditorShell() {
           <span>{project.timeline.fps}fps</span>
           <span className="text-white/15">|</span>
           <span>{project.version}</span>
+          <button
+            type="button"
+            title={
+              latestExportPath
+                ? `导出完成：${latestExportPath}`
+                : "导出当前时间轴为 Final Cut Pro XML"
+            }
+            disabled={!hasTimelineClips || isExporting}
+            onClick={exportFcpxml}
+            className="ml-1 flex items-center gap-1 rounded-[5px] px-2 py-1 text-white/35 transition-colors hover:bg-white/[0.08] hover:text-white/70 disabled:cursor-not-allowed disabled:opacity-35"
+          >
+            {isExporting ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <FileDown className="size-3.5" />
+            )}
+            <span>
+              {latestExportJob?.status === "completed"
+                ? "已导出"
+                : "FCPXML"}
+            </span>
+          </button>
           <Link
             href="/settings"
             title="设置"
@@ -191,14 +302,6 @@ export function EditorShell() {
           >
             <Settings2 className="size-3.5" />
           </Link>
-          <button
-            type="button"
-            onClick={() => setShowExportModal(true)}
-            className="flex items-center gap-1.5 rounded-[5px] bg-white/[0.08] px-3 py-1 text-white/65 transition-colors hover:bg-white/[0.14] hover:text-white/90"
-          >
-            <Download className="size-3.5" />
-            导出
-          </button>
         </div>
       </div>
 
@@ -215,6 +318,16 @@ export function EditorShell() {
                 type="button"
                 title={panel.label}
                 onClick={() => setActivePanel(panel.id)}
+                onDragEnter={() => {
+                  if (dragPayload?.kind !== "media") return;
+                  if (panel.id !== "media" && panel.id !== "sceneGroups") return;
+                  setActivePanel(panel.id);
+                }}
+                onDragOver={() => {
+                  if (dragPayload?.kind !== "media") return;
+                  if (panel.id !== "media" && panel.id !== "sceneGroups") return;
+                  setActivePanel(panel.id);
+                }}
                 className={`flex w-full flex-col items-center gap-1 py-3 transition-colors ${
                   isActive
                     ? "bg-white/[0.1] text-white"
@@ -262,7 +375,7 @@ export function EditorShell() {
           />
           <div
             className={
-              activePanel === "voice"
+              activePanel === "voice" || activePanel === "sceneGroups"
                 ? "flex min-h-0 flex-1 flex-col overflow-hidden"
                 : "min-h-0 flex-1 overflow-y-auto"
             }
@@ -283,11 +396,48 @@ export function EditorShell() {
             <PreviewPanel project={project} playerRef={playerRef} />
           </div>
           <div
-            className="h-[3px] shrink-0 cursor-row-resize bg-white/[0.06] transition-colors hover:bg-white/25 active:bg-white/40"
+            className="h-[7px] shrink-0 cursor-row-resize border-y border-white/[0.04] bg-white/[0.075] transition-colors hover:bg-white/25 active:bg-white/40"
             onMouseDown={startTimelineDrag}
           />
           <div className="shrink-0 overflow-hidden" style={{ height: timelineHeight }}>
-            <TimelinePanel project={project} playerRef={playerRef} />
+            <div className="flex h-full min-h-0 flex-col bg-[#111]">
+              <div className="flex h-8 shrink-0 items-center justify-between border-b border-white/[0.06] bg-[#0c0c0c] px-2">
+                <div className="flex items-center gap-1 rounded-[7px] bg-white/[0.04] p-0.5 text-[12px]">
+                  <button
+                    type="button"
+                    onClick={() => setBottomMode("tracks")}
+                    className={`rounded-[5px] px-3 py-1 transition-colors ${
+                      bottomMode === "tracks"
+                        ? "bg-white/[0.12] text-white/78"
+                        : "text-white/34 hover:bg-white/[0.06] hover:text-white/58"
+                    }`}
+                  >
+                    轨道
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBottomMode("script")}
+                    className={`rounded-[5px] px-3 py-1 transition-colors ${
+                      bottomMode === "script"
+                        ? "bg-violet-400/[0.18] text-violet-50/78"
+                        : "text-white/34 hover:bg-white/[0.06] hover:text-white/58"
+                    }`}
+                  >
+                    脚本
+                  </button>
+                </div>
+                <div className="text-[10px] text-white/22">
+                  {bottomMode === "tracks" ? "时间轴编排" : "AI 脚本剪辑模式"}
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 overflow-hidden">
+                {bottomMode === "tracks" ? (
+                  <TimelinePanel project={project} playerRef={playerRef} />
+                ) : (
+                  <ScriptEditPanel />
+                )}
+              </div>
+            </div>
           </div>
         </div>
 
@@ -302,57 +452,66 @@ export function EditorShell() {
           className="flex shrink-0 flex-col overflow-hidden"
           style={{ width: inspectorWidth }}
         >
-          {/* Tab bar: 聊天 · 技能 · 检查器 */}
-          <div className="flex h-9 shrink-0 items-stretch border-b border-white/[0.06]">
-            {(
-              [
-                { id: "chat", label: "聊天" },
-                { id: "skills", label: "技能" },
-                { id: "inspector", label: "检查器" },
-              ] as const
-            ).map(({ id, label }) => {
-              const isActive = inspectorTab === id;
-              return (
-                <button
-                  key={id}
-                  type="button"
-                  onClick={() => setInspectorTab(id)}
-                  className="relative flex items-center px-3.5 text-[12px] transition-colors"
-                >
-                  <span
-                    className={isActive ? "text-white/75" : "text-white/25 hover:text-white/50"}
-                  >
-                    {label}
-                  </span>
-                  {isActive && (
-                    <span className="absolute bottom-0 left-0 right-0 h-[2px] rounded-full bg-white/40" />
-                  )}
-                </button>
-              );
-            })}
+          <div className="grid h-9 shrink-0 grid-cols-4 border-b border-white/[0.06] bg-white/[0.025] p-1 text-[12px]">
+            <button
+              type="button"
+              onClick={() => setRightPanel("inspector")}
+              className={`rounded-[5px] px-2 text-left transition-colors ${
+                rightPanel === "inspector"
+                  ? "bg-white/[0.1] text-white/80"
+                  : "text-white/35 hover:bg-white/[0.05] hover:text-white/65"
+              }`}
+            >
+              检查器
+            </button>
+            <button
+              type="button"
+              onClick={() => setRightPanel("segment")}
+              className={`rounded-[5px] px-2 text-left transition-colors ${
+                rightPanel === "segment"
+                  ? "bg-white/[0.1] text-white/80"
+                  : "text-white/35 hover:bg-white/[0.05] hover:text-white/65"
+              }`}
+            >
+              片段
+            </button>
+            <button
+              type="button"
+              onClick={() => setRightPanel("subtitles")}
+              className={`rounded-[5px] px-2 text-left transition-colors ${
+                rightPanel === "subtitles"
+                  ? "bg-white/[0.1] text-white/80"
+                  : "text-white/35 hover:bg-white/[0.05] hover:text-white/65"
+              }`}
+            >
+              字幕
+            </button>
+            <button
+              type="button"
+              onClick={() => setRightPanel("analysis")}
+              className={`rounded-[5px] px-2 text-left transition-colors ${
+                rightPanel === "analysis"
+                  ? "bg-white/[0.1] text-white/80"
+                  : "text-white/35 hover:bg-white/[0.05] hover:text-white/65"
+              }`}
+            >
+              AI 分析
+            </button>
           </div>
 
-          <div
-            className={
-              inspectorTab !== "inspector"
-                ? "flex min-h-0 flex-1 flex-col overflow-hidden"
-                : "min-h-0 flex-1 overflow-hidden"
-            }
-          >
-            {inspectorTab === "inspector" && (
-              <InspectorPanel onQuickExport={() => setShowExportModal(true)} />
-            )}
-            {(inspectorTab === "skills" || inspectorTab === "chat") && (
-              <AISidePanel activeTab={inspectorTab} />
+          <div className="min-h-0 flex-1 overflow-hidden">
+            {rightPanel === "inspector" ? (
+              <InspectorPanel />
+            ) : rightPanel === "segment" ? (
+              <SegmentPanel />
+            ) : rightPanel === "subtitles" ? (
+              <SubtitlePanel />
+            ) : (
+              <ClipAnalysisPanel />
             )}
           </div>
         </div>
       </div>
     </main>
-
-    {showExportModal && project && (
-      <ExportModal project={project} onClose={() => setShowExportModal(false)} />
-    )}
-    </>
   );
 }

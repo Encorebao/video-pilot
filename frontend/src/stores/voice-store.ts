@@ -10,7 +10,7 @@ export interface VoiceHistoryItem {
   type: "recording" | "tts";
   name: string;
   durationSec?: number;
-  status: "generating" | "done";
+  status: "generating" | "done" | "failed";
   createdAt: string;
   text?: string;
   speed?: number;

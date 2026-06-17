@@ -30,6 +30,10 @@ export const useTimelineStore = create<TimelineStoreState>((set) => ({
     set({ selectedTrackId: trackId, selectedClipId: clipId });
   },
   setPreviewMediaId: (id) => {
-    set({ previewMediaId: id });
+    set(
+      id
+        ? { previewMediaId: id, selectedTrackId: null, selectedClipId: null }
+        : { previewMediaId: id },
+    );
   },
 }));

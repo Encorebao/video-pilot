@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, protocol, net } from 'electron'
+import { app, BrowserWindow, shell, protocol, net, dialog, ipcMain, type OpenDialogOptions } from 'electron'
 import path from 'path'
 import { pathToFileURL } from 'url'
 
@@ -42,16 +42,57 @@ function createWindow(): BrowserWindow {
   })
 
   if (isDev) {
-    win.loadURL('http://localhost:3000/editor')
+    win.loadURL('http://localhost:3000')
     win.webContents.openDevTools()
   } else {
-    win.loadURL('app://./editor/index.html')
+    win.loadURL('app://./index.html')
   }
 
   return win
 }
 
 app.whenReady().then(() => {
+  ipcMain.handle('project:select-folder', async () => {
+    const focusedWindow = BrowserWindow.getFocusedWindow()
+    const options: OpenDialogOptions = {
+      title: '选择项目文件夹',
+      properties: ['openDirectory', 'createDirectory'],
+    }
+    const result = focusedWindow
+      ? await dialog.showOpenDialog(focusedWindow, options)
+      : await dialog.showOpenDialog(options)
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+
+    return result.filePaths[0]
+  })
+
+  ipcMain.handle('media:select-files', async () => {
+    const focusedWindow = BrowserWindow.getFocusedWindow()
+    const options: OpenDialogOptions = {
+      title: '选择素材文件',
+      properties: ['openFile', 'multiSelections'],
+      filters: [
+        {
+          name: 'Media',
+          extensions: ['mp4', 'mov', 'm4v', 'webm', 'mkv', 'wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg'],
+        },
+        { name: 'All Files', extensions: ['*'] },
+      ],
+    }
+    const result = focusedWindow
+      ? await dialog.showOpenDialog(focusedWindow, options)
+      : await dialog.showOpenDialog(options)
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return null
+    }
+
+    return result.filePaths
+  })
+
   // Register custom protocol to serve static Next.js export in production
   protocol.handle('app', (request) => {
     const urlPath = new URL(request.url).pathname

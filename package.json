@@ -1,10 +1,16 @@
 {
-  "name": "video-studio",
+  "name": "video-pilot",
   "version": "0.1.0",
-  "private": true,
+  "private": false,
   "main": "dist/electron/main/index.js",
   "scripts": {
+    "pilot": "node scripts/pilot.mjs",
+    "pilot:setup": "node scripts/pilot.mjs setup",
+    "pilot:check": "node scripts/pilot.mjs check",
     "dev": "concurrently -n NEXT,ELECTRON -c blue,green \"yarn --cwd frontend dev\" \"wait-on http://localhost:3000 && yarn build:electron && electron .\"",
+    "dev:full": "concurrently -n BACKEND,WORKER,NEXT,ELECTRON -c magenta,yellow,blue,green \"cd backend && .venv/bin/python -m uvicorn app.main:app --reload --port 8765\" \"cd backend && .venv/bin/python -m app.worker\" \"yarn --cwd frontend dev\" \"wait-on http://localhost:3000 && yarn build:electron && electron .\"",
+    "backend:dev": "cd backend && .venv/bin/python -m uvicorn app.main:app --reload --port 8765",
+    "backend:worker": "cd backend && .venv/bin/python -m app.worker",
     "build:frontend": "yarn --cwd frontend build",
     "build:electron": "tsc -p electron/tsconfig.json",
     "build": "yarn build:frontend && yarn build:electron",

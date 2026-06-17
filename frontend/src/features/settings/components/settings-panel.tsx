@@ -19,7 +19,7 @@ import type {
 const categoryLabel: Record<ModelCategory, string> = {
   vl: "VL 模型",
   llm: "LLM 模型",
-  audio: "音频处理",
+  stt: "语音转写",
   tts: "声音合成",
 };
 
@@ -27,6 +27,7 @@ const statusLabel: Record<ModelStatus, string> = {
   unconfigured: "未配置",
   configured: "已配置",
   ready: "已检查",
+  error: "检查失败",
 };
 
 const dependencyStatusLabel: Record<DependencyStatus, string> = {

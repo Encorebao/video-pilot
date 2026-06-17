@@ -1,29 +1,33 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Brain,
   Cable,
+  Captions,
   CheckCircle2,
   ChevronLeft,
   Cpu,
+  Download,
   ExternalLink,
   FolderOpen,
+  Play,
   KeyRound,
   Keyboard,
-  Languages,
-  MonitorSpeaker,
   PackageCheck,
   Palette,
   RefreshCw,
   Settings2,
   Sliders,
+  Square,
+  Trash2,
   Video,
   Volume2,
-  Zap,
 } from "lucide-react";
 
+import { clearProjectCache } from "@/services/project-api";
+import { useProjectStore } from "@/stores/project-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import type { DependencyItem, ModelConfig } from "@/types/settings";
 
@@ -39,6 +43,7 @@ type SectionId =
   | "audio-spec"
   | "export-defaults"
   | "ai-models"
+  | "whisper-local"
   | "ai-deps";
 
 interface NavItem {
@@ -75,6 +80,7 @@ const NAV_GROUPS: NavGroup[] = [
     title: "AI 模型",
     items: [
       { id: "ai-models", label: "模型接入", icon: <Brain className="size-3.5" /> },
+      { id: "whisper-local", label: "Whisper 本地模型", icon: <Captions className="size-3.5" /> },
       { id: "ai-deps", label: "依赖检查", icon: <PackageCheck className="size-3.5" /> },
     ],
   },
@@ -293,6 +299,24 @@ function ShortcutsSection() {
 }
 
 function StorageSection() {
+  const project = useProjectStore((s) => s.currentProject);
+  const [cacheMessage, setCacheMessage] = useState<string | null>(null);
+  const [isClearing, setIsClearing] = useState(false);
+
+  async function clearCurrentProjectCache() {
+    if (!project) return;
+    setIsClearing(true);
+    setCacheMessage(null);
+    try {
+      const result = await clearProjectCache(project.location);
+      setCacheMessage(`已清理 ${formatBytes(result.removedBytes)}，目录：${result.cachePath}`);
+    } catch (error) {
+      setCacheMessage(error instanceof Error ? error.message : "清理缓存失败");
+    } finally {
+      setIsClearing(false);
+    }
+  }
+
   return (
     <div>
       <SectionTitle>存储路径</SectionTitle>
@@ -324,6 +348,24 @@ function StorageSection() {
             ]}
           />
         </SettingRow>
+        <SettingRow
+          label="清理当前项目缓存"
+          description="删除 cache 下的中间文件，不影响字幕、素材和项目状态"
+        >
+          <button
+            type="button"
+            disabled={!project || isClearing}
+            onClick={() => void clearCurrentProjectCache()}
+            className="rounded-[7px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[11px] text-white/55 transition-colors hover:bg-white/[0.1] hover:text-white/80 disabled:pointer-events-none disabled:opacity-35"
+          >
+            {isClearing ? "清理中..." : "清理缓存"}
+          </button>
+        </SettingRow>
+        {cacheMessage ? (
+          <p className="mt-2 rounded-[7px] border border-white/[0.06] bg-white/[0.025] px-3 py-2 text-[11px] leading-4 text-white/35">
+            {cacheMessage}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -599,13 +641,14 @@ function ExportDefaultsSection() {
 const MODEL_CATEGORY_LABEL: Record<string, string> = {
   vl: "视觉理解",
   llm: "语言模型",
-  audio: "语音识别",
+  stt: "语音识别",
   tts: "语音合成",
 };
 
 const MODEL_STATUS_STYLE: Record<string, string> = {
   ready: "border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-400/80",
   configured: "border-blue-500/30 bg-blue-500/[0.08] text-blue-400/80",
+  error: "border-red-500/30 bg-red-500/[0.08] text-red-400/80",
   unconfigured: "border-white/[0.1] bg-white/[0.04] text-white/30",
 };
 
@@ -623,6 +666,14 @@ const DEP_STATUS_LABEL: Record<string, string> = {
 
 // ─── AI section sub-components ─────────────────────────────────────────────────
 
+function formatBytes(bytes?: number) {
+  const value = bytes ?? 0;
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
 function Badge({ children, className }: { children: React.ReactNode; className?: string }) {
   return (
     <span
@@ -637,12 +688,18 @@ function Badge({ children, className }: { children: React.ReactNode; className?:
 
 function ModelConfigCard({ model }: { model: ModelConfig }) {
   const [endpoint, setEndpoint] = useState(model.endpoint);
+  const [modelName, setModelName] = useState(model.model);
   const [apiKey, setApiKey] = useState(model.apiKey);
+  const [enabled, setEnabled] = useState(model.enabled);
   const [showKey, setShowKey] = useState(false);
   const updateModelConfig = useSettingsStore((s) => s.updateModelConfig);
   const runModelCheck = useSettingsStore((s) => s.runModelCheck);
 
-  const isDirty = endpoint !== model.endpoint || apiKey !== model.apiKey;
+  const isDirty =
+    endpoint !== model.endpoint ||
+    modelName !== model.model ||
+    apiKey.trim() !== "" ||
+    enabled !== model.enabled;
 
   return (
     <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
@@ -655,7 +712,13 @@ function ModelConfigCard({ model }: { model: ModelConfig }) {
         <div className="flex shrink-0 items-center gap-1.5">
           <Badge>{MODEL_CATEGORY_LABEL[model.category] ?? model.category}</Badge>
           <Badge className={MODEL_STATUS_STYLE[model.status] ?? MODEL_STATUS_STYLE.unconfigured}>
-            {model.status === "ready" ? "已检查" : model.status === "configured" ? "已配置" : "未配置"}
+            {model.status === "ready"
+              ? "已检查"
+              : model.status === "configured"
+                ? "已配置"
+                : model.status === "error"
+                  ? "错误"
+                  : "未配置"}
           </Badge>
         </div>
       </div>
@@ -676,13 +739,23 @@ function ModelConfigCard({ model }: { model: ModelConfig }) {
           />
         </div>
         <div>
+          <label className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">模型 ID</label>
+          <input
+            type="text"
+            value={modelName}
+            onChange={(e) => setModelName(e.target.value)}
+            placeholder="gpt-4.1-mini"
+            className="w-full rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 text-[12px] text-white/70 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
+          />
+        </div>
+        <div>
           <label className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">API Key</label>
           <div className="flex gap-1.5">
             <input
               type={showKey ? "text" : "password"}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder="sk-..."
+              placeholder={model.apiKeyConfigured ? "已保存，留空则不修改" : "sk-..."}
               className="flex-1 min-w-0 rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 font-mono text-[12px] text-white/70 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
             />
             <button
@@ -694,6 +767,15 @@ function ModelConfigCard({ model }: { model: ModelConfig }) {
             </button>
           </div>
         </div>
+        <label className="flex items-center justify-between rounded-[7px] border border-white/[0.07] bg-white/[0.025] px-2.5 py-2">
+          <span className="text-[11px] text-white/45">启用此能力</span>
+          <input
+            type="checkbox"
+            checked={enabled}
+            onChange={(e) => setEnabled(e.target.checked)}
+            className="size-3.5 accent-violet-500"
+          />
+        </label>
       </div>
 
       {/* Actions */}
@@ -701,7 +783,14 @@ function ModelConfigCard({ model }: { model: ModelConfig }) {
         <button
           type="button"
           disabled={!isDirty}
-          onClick={() => updateModelConfig(model.id, { endpoint, apiKey })}
+          onClick={() =>
+            void updateModelConfig(model.id, {
+              endpoint,
+              model: modelName,
+              apiKey,
+              enabled,
+            })
+          }
           className="flex items-center gap-1.5 rounded-[7px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[11px] text-white/60 transition-colors hover:bg-white/[0.1] hover:text-white/80 disabled:pointer-events-none disabled:opacity-30"
         >
           <KeyRound className="size-3" />
@@ -709,7 +798,7 @@ function ModelConfigCard({ model }: { model: ModelConfig }) {
         </button>
         <button
           type="button"
-          onClick={() => runModelCheck(model.id)}
+          onClick={() => void runModelCheck(model.id)}
           className="flex items-center gap-1.5 rounded-[7px] border border-white/[0.1] px-3 py-1.5 text-[11px] text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white/70"
         >
           <Cable className="size-3" />
@@ -732,12 +821,19 @@ function ModelConfigCard({ model }: { model: ModelConfig }) {
           最近检查：{model.lastCheckedAt}
         </p>
       )}
+      {model.error && (
+        <p className="mt-2.5 text-[10px] leading-4 text-red-300/55">
+          {model.error}
+        </p>
+      )}
     </div>
   );
 }
 
 function AiModelsSection() {
   const modelConfigs = useSettingsStore((s) => s.modelConfigs);
+  const isLoadingModels = useSettingsStore((s) => s.isLoadingModels);
+  const modelConfigError = useSettingsStore((s) => s.modelConfigError);
   const ready = modelConfigs.filter((m) => m.status === "ready").length;
   const configured = modelConfigs.filter((m) => m.status !== "unconfigured").length;
 
@@ -747,24 +843,222 @@ function AiModelsSection() {
     if (!grouped[m.category]) grouped[m.category] = [];
     grouped[m.category].push(m);
   }
-  const categoryOrder = ["vl", "llm", "audio", "tts"];
+  const categoryOrder = ["vl", "llm", "tts"];
 
   return (
     <div>
       <div className="mb-6 flex items-end justify-between">
         <h2 className="text-base font-semibold text-white/85">模型接入</h2>
         <span className="text-[11px] text-white/25">
-          {ready} 就绪 · {configured} 已配置 · {modelConfigs.length} 总计
+          {isLoadingModels
+            ? "读取中..."
+            : `${ready} 就绪 · ${configured} 已配置 · ${modelConfigs.length} 总计`}
         </span>
       </div>
+      {modelConfigError ? (
+        <div className="mb-3 rounded-[8px] border border-red-300/15 bg-red-300/[0.06] px-3 py-2 text-[11px] leading-4 text-red-100/60">
+          {modelConfigError}
+        </div>
+      ) : null}
 
       <div className="flex flex-col gap-3">
+        {!isLoadingModels && modelConfigs.length === 0 ? (
+          <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4 text-[12px] text-white/35">
+            暂无模型配置。请确认后端服务已启动。
+          </div>
+        ) : null}
         {categoryOrder.map((cat) =>
           (grouped[cat] ?? []).map((model) => (
             <ModelConfigCard key={model.id} model={model} />
           ))
         )}
       </div>
+    </div>
+  );
+}
+
+function WhisperLocalSection() {
+  const whisperStatus = useSettingsStore((s) => s.whisperStatus);
+  const isLoadingWhisper = useSettingsStore((s) => s.isLoadingWhisper);
+  const whisperError = useSettingsStore((s) => s.whisperError);
+  const loadWhisperStatus = useSettingsStore((s) => s.loadWhisperStatus);
+  const downloadDefaultWhisperModel = useSettingsStore((s) => s.downloadDefaultWhisperModel);
+  const installManualWhisperModel = useSettingsStore((s) => s.installManualWhisperModel);
+  const deleteWhisperModel = useSettingsStore((s) => s.deleteWhisperModel);
+  const startWhisperService = useSettingsStore((s) => s.startWhisperService);
+  const stopWhisperService = useSettingsStore((s) => s.stopWhisperService);
+  const [manualPath, setManualPath] = useState("");
+
+  useEffect(() => {
+    void loadWhisperStatus();
+  }, [loadWhisperStatus]);
+
+  useEffect(() => {
+    if (!whisperStatus?.downloadRunning) return;
+    const timer = window.setInterval(() => void loadWhisperStatus(), 2000);
+    return () => window.clearInterval(timer);
+  }, [loadWhisperStatus, whisperStatus?.downloadRunning]);
+
+  const models = whisperStatus?.models ?? [];
+  const currentModel = models.find((model) => model.id === whisperStatus?.currentModelId) ?? null;
+  const statusLabel =
+    whisperStatus?.status === "ready"
+      ? "已启动"
+      : whisperStatus?.status === "starting"
+        ? "启动中"
+        : whisperStatus?.status === "error"
+          ? "错误"
+          : "未启动";
+  const statusStyle =
+    whisperStatus?.status === "ready"
+      ? MODEL_STATUS_STYLE.ready
+      : whisperStatus?.status === "error"
+        ? MODEL_STATUS_STYLE.error
+        : MODEL_STATUS_STYLE.unconfigured;
+
+  return (
+    <div>
+      <div className="mb-6 flex items-end justify-between">
+        <h2 className="text-base font-semibold text-white/85">Whisper 本地模型</h2>
+        <Badge className={statusStyle}>
+          {whisperStatus?.downloadRunning ? "下载中" : statusLabel}
+        </Badge>
+      </div>
+
+      <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
+        <div className="flex flex-wrap items-start gap-3">
+          <div className="min-w-0 flex-1">
+            <p className="text-[13px] font-semibold text-white/80">
+              {currentModel ? currentModel.name : "未加载模型"}
+            </p>
+            <p className="mt-1 truncate font-mono text-[11px] text-white/30">
+              {currentModel?.path ?? "请下载或安装模型后启动服务"}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadWhisperStatus()}
+            className="flex items-center gap-1.5 rounded-[7px] border border-white/[0.1] px-3 py-1.5 text-[11px] text-white/40 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+          >
+            <RefreshCw className="size-3" />
+            刷新
+          </button>
+        </div>
+        {whisperError ? (
+          <p className="mt-3 rounded-[7px] border border-red-300/15 bg-red-300/[0.06] px-3 py-2 text-[11px] leading-4 text-red-100/60">
+            {whisperError}
+          </p>
+        ) : null}
+        {whisperStatus?.error ? (
+          <p className="mt-3 rounded-[7px] border border-amber-300/15 bg-amber-300/[0.06] px-3 py-2 text-[11px] leading-4 text-amber-100/60">
+            {whisperStatus.error}
+          </p>
+        ) : null}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button
+            type="button"
+            disabled={isLoadingWhisper}
+            onClick={() => void downloadDefaultWhisperModel()}
+            className="flex items-center gap-1.5 rounded-[7px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[11px] text-white/60 transition-colors hover:bg-white/[0.1] hover:text-white/80 disabled:pointer-events-none disabled:opacity-35"
+          >
+            <Download className="size-3" />
+            {isLoadingWhisper || whisperStatus?.downloadRunning ? "处理中..." : "下载默认模型"}
+          </button>
+          {whisperStatus?.status === "ready" ? (
+            <button
+              type="button"
+              disabled={isLoadingWhisper}
+              onClick={() => void stopWhisperService()}
+              className="flex items-center gap-1.5 rounded-[7px] border border-white/[0.1] px-3 py-1.5 text-[11px] text-white/45 transition-colors hover:bg-white/[0.06] hover:text-white/75 disabled:pointer-events-none disabled:opacity-35"
+            >
+              <Square className="size-3" />
+              停止服务
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="mt-3 rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
+        <p className="text-[13px] font-semibold text-white/80">手动安装模型</p>
+        <p className="mt-1 text-[11px] leading-relaxed text-white/30">
+          目录需要包含 config.json 和 safetensors 权重文件。
+        </p>
+        <div className="mt-3 flex gap-2">
+          <input
+            type="text"
+            value={manualPath}
+            onChange={(event) => setManualPath(event.target.value)}
+            placeholder="/path/to/local/mlx-whisper-model"
+            className="min-w-0 flex-1 rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 font-mono text-[12px] text-white/70 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
+          />
+          <button
+            type="button"
+            disabled={isLoadingWhisper || !manualPath.trim()}
+            onClick={() => void installManualWhisperModel(manualPath)}
+            className="rounded-[7px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[11px] text-white/55 transition-colors hover:bg-white/[0.1] hover:text-white/80 disabled:pointer-events-none disabled:opacity-35"
+          >
+            安装
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-col gap-2">
+        {models.length === 0 ? (
+          <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4 text-[12px] text-white/35">
+            {whisperStatus?.downloadRunning
+              ? `正在下载 ${whisperStatus.downloadRepo ?? "默认模型"}，完成后会自动出现在这里。`
+              : "暂无可用 Whisper 模型。"}
+          </div>
+        ) : null}
+        {models.map((model) => {
+          const isCurrent = model.id === whisperStatus?.currentModelId;
+          return (
+            <div key={model.id} className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
+              <div className="flex flex-wrap items-start gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold text-white/80">{model.name}</p>
+                  <p className="mt-1 truncate font-mono text-[11px] text-white/30">{model.path}</p>
+                </div>
+                <Badge>{model.source === "managed" ? "受管模型" : "手动模型"}</Badge>
+                {isCurrent ? <Badge className={MODEL_STATUS_STYLE.ready}>当前服务</Badge> : null}
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-white/25">
+                <span>{model.repo}</span>
+                <span>{formatBytes(model.sizeBytes)}</span>
+                <button
+                  type="button"
+                  disabled={isLoadingWhisper || isCurrent}
+                  onClick={() => void startWhisperService(model.id)}
+                  className="ml-auto flex items-center gap-1.5 rounded-[7px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[11px] text-white/55 transition-colors hover:bg-white/[0.1] hover:text-white/80 disabled:pointer-events-none disabled:opacity-35"
+                >
+                  <Play className="size-3" />
+                  启动
+                </button>
+                <button
+                  type="button"
+                  disabled={isLoadingWhisper || model.source !== "managed"}
+                  onClick={() => void deleteWhisperModel(model.id)}
+                  className="flex items-center gap-1.5 rounded-[7px] border border-red-300/10 px-3 py-1.5 text-[11px] text-red-200/45 transition-colors hover:bg-red-500/[0.08] hover:text-red-200/75 disabled:pointer-events-none disabled:opacity-30"
+                >
+                  <Trash2 className="size-3" />
+                  删除
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {whisperStatus?.logs.length ? (
+        <div className="mt-3 rounded-[10px] border border-white/[0.07] bg-black/20 p-3">
+          <p className="mb-2 text-[11px] font-medium text-white/40">服务日志</p>
+          <div className="max-h-40 overflow-y-auto font-mono text-[10px] leading-4 text-white/25">
+            {whisperStatus.logs.slice(-20).map((line) => (
+              <div key={line}>{line}</div>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -846,6 +1140,7 @@ const SECTION_COMPONENTS: Record<SectionId, React.ReactNode> = {
   "audio-spec": <AudioSpecSection />,
   "export-defaults": <ExportDefaultsSection />,
   "ai-models": <AiModelsSection />,
+  "whisper-local": <WhisperLocalSection />,
   "ai-deps": <AiDepsSection />,
 };
 
@@ -853,14 +1148,22 @@ const SECTION_COMPONENTS: Record<SectionId, React.ReactNode> = {
 
 export default function SettingsPage() {
   const [active, setActive] = useState<SectionId>("appearance");
+  const loadModelConfigs = useSettingsStore((s) => s.loadModelConfigs);
+  const loadWhisperStatus = useSettingsStore((s) => s.loadWhisperStatus);
+
+  useEffect(() => {
+    void loadModelConfigs();
+    void loadWhisperStatus();
+  }, [loadModelConfigs, loadWhisperStatus]);
 
   return (
     <div className="flex h-screen flex-col bg-[#0d0d0d] text-white">
       {/* ── Top bar ── */}
-      <header className="flex h-11 shrink-0 items-center gap-3 border-b border-white/[0.06] bg-[#111] px-4">
+      <header className="electron-titlebar flex h-11 shrink-0 items-center gap-3 border-b border-white/[0.06] bg-[#111] px-4">
+        <div className="w-[80px] shrink-0" />
         <Link
           href="/editor"
-          className="flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-[12px] text-white/35 transition-colors hover:bg-white/[0.07] hover:text-white/65"
+          className="electron-no-drag flex items-center gap-1.5 rounded-[6px] px-2 py-1 text-[12px] text-white/35 transition-colors hover:bg-white/[0.07] hover:text-white/65"
         >
           <ChevronLeft className="size-3.5" />
           返回编辑器

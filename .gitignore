@@ -39,10 +39,24 @@ env/
 dist-python/
 
 # ── Backend storage (runtime data, not source) ────────────────────────────────
+backend/storage/*.db
+backend/storage/*.db-*
 backend/storage/exports/
 backend/storage/media/
 backend/storage/projects/
 backend/storage/temp/
+backend/storage/logs/
+
+# ── Local models and private sample media ─────────────────────────────────────
+backend/models/
+frontend/public/media/*
+!frontend/public/media/.gitkeep
+
+# ── Private editor plugin experiments (split into a separate repo later) ─────
+resolve-plugin/
+doc/davinci/
+backend/app/api/resolve.py
+backend/tests/test_resolve_api.py
 
 # ── Test artifacts ────────────────────────────────────────────────────────────
 .playwright-mcp/
@@ -61,4 +75,4 @@ coverage/
 .idea/
 *.swp
 *.swo
-
+.worktrees/
