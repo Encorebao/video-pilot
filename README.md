@@ -1,94 +1,98 @@
 # Video Pilot
 
-Video Pilot is an open-source desktop workspace for AI-assisted video editing. It combines a Next.js editor, an Electron shell, a FastAPI backend, Remotion preview playback, and local project storage.
+Video Pilot 是一个开源的 AI 辅助视频剪辑桌面工作台。项目由 Next.js 编辑器、Electron 桌面壳、FastAPI 后端、Remotion 预览播放和本地项目存储组成。
 
-## Languages
+> 当前应用界面以中文为主。英文 README 作为后续国际化和英文贡献者参考。
 
-- English: [README.md](./README.md)
-- 简体中文: [README.zh-CN.md](./README.zh-CN.md)
+## 语言
 
-More translations are welcome. If you would like to help maintain another language version, please open an issue or pull request.
+- 简体中文: [README.md](./README.md)
+- English: [README.en.md](./README.en.md)
 
-## Features
+欢迎贡献更多语言版本。如果你愿意帮助维护其他语言的 README，可以通过 issue 或 pull request 参与。
 
-- Local project folders with portable project manifests.
-- Visual-model analysis for building a searchable media library from imported clips.
-- Per-clip scoring and structured parameters, so materials can be compared by quality, content, shot type, motion, transcript, and editing value.
-- Media grouping and segmenting workflows, with notes on each segment for planning, review, and rough-cut decisions.
-- Language-model and speech-recognition workflows for detecting spoken language and text content inside source material.
-- Script AI assistant for arranging selected clips into draft timelines and rough-cut structures.
-- OpenAI-compatible model settings for local or remote visual, language, speech-to-text, and text-to-speech endpoints.
-- SQLite-backed local settings and recent project state.
-- Electron desktop shell for local folder access.
+## 功能概览
 
-## Requirements
+- 使用本地文件夹保存项目，项目数据可迁移。
+- 支持视觉模型分析导入素材，自动建立可检索、可筛选的素材库。
+- 每个素材都可以保存评分和结构化参数，方便按质量、内容、景别、运镜、字幕和剪辑价值进行比较。
+- 支持对素材进行编组和分段，并为每个分段记录备注，用于复盘、筛选和粗剪规划。
+- 支持通过语言模型和语音识别能力，识别素材中的口播语言、字幕线索和文字内容。
+- 支持脚本 AI 助手根据素材内容和剪辑目标排列片段，生成可继续调整的粗剪结构。
+- 支持本地或远程 OpenAI-compatible 视觉、语言、语音识别和语音合成模型配置。
+- 使用 SQLite 保存本地设置和最近项目。
+- Electron 桌面端支持本地文件夹选择。
 
-- Node.js 20 or newer.
-- Python 3.11 or newer.
-- ffmpeg is recommended for media analysis and frame extraction.
-- macOS is recommended for MLX Whisper. Linux and Windows can still run the app with remote OpenAI-compatible services or their own local compatible endpoints.
+## 环境要求
 
-## Quick Start
+- Node.js 20 或更新版本。
+- Python 3.11 或更新版本。
+- 推荐安装 ffmpeg，用于媒体分析和抽帧。
+- MLX Whisper 更适合 macOS；Linux 和 Windows 可以使用远程 OpenAI-compatible 服务，或接入自己的本地兼容服务。
+
+## 一条命令启动
 
 ```bash
 npm run pilot
 ```
 
-The command installs JavaScript dependencies, creates `backend/.venv`, installs Python dependencies, initializes `backend/storage/app.db`, asks for a local or remote OpenAI-compatible model profile, and starts the backend, worker, Next.js frontend, and Electron app.
+这个命令会自动完成：
 
-Useful variants:
+- 安装根目录和 `frontend/` 的 JavaScript 依赖。
+- 创建 `backend/.venv`。
+- 安装 `backend/requirements.txt` 中的 Python 依赖。
+- 创建并初始化 `backend/storage/app.db`。
+- 引导配置本地或远程 OpenAI-compatible 模型。
+- 启动后端、worker、Next.js 前端和 Electron 桌面端。
+
+其他命令：
 
 ```bash
 npm run pilot:setup
 npm run pilot:check
 ```
 
-Advanced development commands remain available:
+## 模型配置
 
-```bash
-npm run backend:dev
-npm run backend:worker
-npm --prefix frontend run dev
-npm run electron
+模型配置保存在本地 SQLite 数据库：
+
+```text
+backend/storage/app.db
 ```
 
-## Model Configuration
+支持两种配置：
 
-Video Pilot stores model settings in the local SQLite database at `backend/storage/app.db`.
+- 本地模型：默认 `http://127.0.0.1:8000/v1`，允许空 API key，适合 Ollama、LM Studio、vLLM、mlx-lm server 等 OpenAI-compatible 服务。
+- 远程模型：默认 `https://api.openai.com/v1`，需要 API key。API key 只写入本地 SQLite，不会通过设置接口返回，也不会进入 Git 跟踪文件。
 
-- Local profile: `http://127.0.0.1:8000/v1`, no API key required. Use this for Ollama, LM Studio, vLLM, mlx-lm server, or another OpenAI-compatible local service.
-- Remote profile: `https://api.openai.com/v1`, API key required. The key is stored only in the local SQLite database and is not returned by the settings API.
+仓库不包含 Whisper/MLX 模型权重。请按需要自行下载模型，并确保模型目录不提交到 Git。
 
-The repository does not include model weights. Download MLX Whisper or other local models separately and keep them outside Git-tracked source files.
+## 隐私边界
 
-## Privacy And Local Data
+不要提交以下内容：
 
-Do not commit:
+- `.env` 文件或任何 API key。
+- `backend/storage/` 中的数据库、日志、导出文件、媒体和项目运行数据。
+- 用户自己的视频、音频、图片素材。
+- `backend/models/` 中下载的模型权重。
 
-- `.env` files or API keys.
-- `backend/storage/` databases, logs, exports, media, or project runtime data.
-- User video/audio files.
-- Downloaded model weights under `backend/models/`.
+这些路径已在 `.gitignore` 中默认忽略。
 
-The `.gitignore` file excludes these paths by default.
+## 目录结构
 
-## Repository Layout
+- `frontend/`: Next.js 编辑器界面。
+- `electron/`: Electron 主进程和 preload。
+- `backend/`: FastAPI API、后台 worker、项目存储和 AI 服务适配。
+- `scripts/pilot.mjs`: 跨平台初始化和启动命令。
 
-- `frontend/`: Next.js editor UI.
-- `electron/`: Electron main and preload processes.
-- `backend/`: FastAPI API, worker, project storage, AI service adapters.
-- `scripts/pilot.mjs`: cross-platform bootstrap and launch command.
+## 贡献方式
 
-## Open Source Note
+这是我第一次开源项目。我还在学习如何使用 GitHub 管理 issue、pull request、release，以及如何长期迭代一个开源项目。如果你发现文档不清楚、贡献流程不完善，或者有更适合开源协作的项目管理方式，欢迎在 issue 中给我反馈。关于开源治理和项目管理的建议也非常欢迎。
 
-This is my first open-source project. I am still learning how to use GitHub to manage issues, pull requests, releases, and long-term community iteration. If you notice unclear documentation, missing contribution workflows, or better ways to organize the project, please share feedback in issues. Suggestions about open-source governance and project management are especially welcome.
+Video Pilot 希望由社区共同完成。请先阅读 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
-## Contributing
+所有贡献都通过 Pull Request 合并。PR 需要通过 CI，并至少经过一名 maintainer review。默认使用 squash merge。
 
-Video Pilot is intended to be built with community contributions. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) before opening a pull request.
+## 许可证
 
-All changes should go through pull requests, pass CI, and receive maintainer review before merge. The default merge strategy is squash merge.
-
-## License
-
-Video Pilot is released under the MIT License. Third-party dependencies, models, media, Remotion, MLX Whisper, and other external tools remain governed by their own licenses.
+Video Pilot 使用 MIT License。第三方依赖、模型、媒体、Remotion、MLX Whisper 和其他外部工具遵循各自许可证。
