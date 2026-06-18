@@ -4,6 +4,9 @@ from pathlib import Path
 from typing import Any
 
 
+KEYWORD_FIELDS = ("subject_keywords", "scene_keywords", "search_keywords")
+
+
 def _video_key(video: dict[str, Any]) -> str:
     path = str(video.get("video_path") or "").strip()
     name = str(video.get("video") or "").strip()
@@ -52,6 +55,40 @@ def merge_legacy_summaries(*summaries: dict[str, Any] | None) -> dict[str, Any] 
     merged["total_videos"] = len(videos)
     merged["scene_groups"] = scene_groups or []
     return merged
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [item.strip() for item in value.replace("，", ",").replace("、", ",").split(",") if item.strip()]
+    return []
+
+
+def build_keyword_dictionary(summary: dict[str, Any] | None) -> list[str]:
+    if not isinstance(summary, dict):
+        return []
+
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for video in summary.get("videos") or []:
+        if not isinstance(video, dict):
+            continue
+        scenes = video.get("visual_analysis", {}).get("scenes", [])
+        if not isinstance(scenes, list):
+            continue
+        for scene in scenes:
+            if not isinstance(scene, dict):
+                continue
+            vl = scene.get("vl_analysis")
+            if not isinstance(vl, dict):
+                continue
+            for field in KEYWORD_FIELDS:
+                for keyword in _string_list(vl.get(field)):
+                    if keyword not in seen:
+                        seen.add(keyword)
+                        keywords.append(keyword)
+    return keywords
 
 
 def legacy_scene_count(summary: dict[str, Any] | None) -> int:

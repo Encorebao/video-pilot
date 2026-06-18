@@ -181,13 +181,17 @@ export interface LegacySegmentSpeech {
 }
 
 export interface LegacySegmentVisual {
+  visual_description?: string;
   shot_type?: string;
   subject?: string;
   subject_category?: string;
+  subject_keywords?: string[];
   action?: string;
   action_type?: string;
+  place_context?: string;
   environment?: string;
   environment_type?: string;
+  scene_keywords?: string[];
   lighting?: string;
   lighting_type?: string;
   color_tone?: string;
@@ -229,6 +233,7 @@ export interface LegacyVisualAnalysisScene {
   keyframe_time?: number;
   segment_type?: "aroll" | "broll" | string;
   speech?: LegacySegmentSpeech;
+  segment_analysis_source?: "video_vl" | "frame_fallback" | string;
   segment_analysis?: LegacySegmentAnalysis;
   segment_analysis_error?: string;
   vl_analysis?: Record<
@@ -242,6 +247,7 @@ export interface LegacyVisualAnalysisScene {
       time?: number;
       frame?: string;
       camera_movement?: string;
+      movement_evidence?: string;
     }>;
   };
   quality_metrics?: Record<string, string | number | boolean | string[] | null | undefined>;
@@ -307,6 +313,7 @@ export interface AnalysisResults {
   keyframes: KeyframeMarker[];
   transcriptSegments: TranscriptSegment[];
   editSuggestions: EditSuggestion[];
+  keywordDictionary: string[];
   legacySummary?: LegacyAnalysisSummary | null;
 }
 

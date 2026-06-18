@@ -1,16 +1,26 @@
 from pathlib import Path
 
 
-def test_scene_probe_times_uses_three_points_for_normal_scene():
+def test_scene_probe_times_uses_lightweight_temporal_samples_first():
     from app.services.frame_extraction import scene_probe_times
 
-    probes = scene_probe_times({"start": 2.0, "end": 8.0}, video_duration=10.0)
-
-    assert probes == [
-        {"label": "first", "time": 2.1},
-        {"label": "middle", "time": 5.0},
-        {"label": "last", "time": 7.9},
+    cases = [
+        ({"start": 2.0, "end": 2.4}, 1),
+        ({"start": 2.0, "end": 3.0}, 3),
+        ({"start": 2.0, "end": 5.0}, 3),
+        ({"start": 2.0, "end": 8.0}, 5),
+        ({"start": 2.0, "end": 15.0}, 5),
     ]
+
+    for scene, expected_count in cases:
+        probes = scene_probe_times(scene, video_duration=20.0)
+
+        assert len(probes) == expected_count
+        times = [float(probe["time"]) for probe in probes]
+        assert times == sorted(times)
+        if expected_count > 1:
+            assert times[0] > float(scene["start"])
+            assert times[-1] < float(scene["end"])
 
 
 def test_scene_probe_times_collapses_short_scene_to_middle():
@@ -18,7 +28,33 @@ def test_scene_probe_times_collapses_short_scene_to_middle():
 
     probes = scene_probe_times({"start": 2.0, "end": 2.3}, video_duration=10.0)
 
-    assert probes == [{"label": "middle", "time": 2.15}]
+    assert probes == [{"label": "sample_01", "time": 2.15}]
+
+
+def test_expanded_scene_probe_times_adds_more_samples_only_for_uncertain_fallback():
+    from app.services.frame_extraction import expanded_scene_probe_times, scene_probe_times
+
+    scene = {"start": 2.0, "end": 15.0}
+
+    initial = scene_probe_times(scene, video_duration=20.0)
+    expanded = expanded_scene_probe_times(scene, video_duration=20.0)
+
+    assert len(initial) == 5
+    assert len(expanded) == 9
+    assert {(probe["label"], probe["time"]) for probe in initial}.issubset(
+        {(probe["label"], probe["time"]) for probe in expanded}
+    )
+    assert [probe["label"] for probe in expanded] == [
+        "sample_01",
+        "sample_02",
+        "sample_03",
+        "sample_04",
+        "sample_05",
+        "sample_06",
+        "sample_07",
+        "sample_08",
+        "sample_09",
+    ]
 
 
 def test_extract_keyframe_clamps_time_and_runs_ffmpeg(monkeypatch, tmp_path: Path):
@@ -143,7 +179,17 @@ def test_extract_video_keyframes_falls_back_to_single_scene(monkeypatch, tmp_pat
     scene = result["visual_analysis"]["scenes"][0]
     assert scene["keyframe_time"] == 6.0
     assert Path(scene["keyframe"]).exists()
-    assert extracted == [(source, 0.1, "frame_000_first.jpg"), (source, 6.0, "frame_000.jpg"), (source, 11.9, "frame_000_last.jpg")]
+    assert scene["movement_probe"]["method"] == "adaptive_temporal_samples"
+    assert [sample["label"] for sample in scene["movement_probe"]["samples"]] == [
+        "sample_01",
+        "sample_03",
+        "sample_05",
+        "sample_07",
+        "sample_09",
+    ]
+    assert extracted[0] == (source, 0.1, "frame_000_sample_01.jpg")
+    assert extracted[2] == (source, 6.0, "frame_000.jpg")
+    assert extracted[-1] == (source, 11.9, "frame_000_sample_09.jpg")
 
 
 def test_extract_video_keyframes_applies_fixed_lut_for_slog3(

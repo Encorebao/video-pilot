@@ -11,8 +11,8 @@ jobs:
     name: Frontend
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
         with:
           node-version: "20"
           cache: npm
@@ -29,11 +29,16 @@ jobs:
     name: Backend
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - run: python -m venv backend/.venv
       - run: backend/.venv/bin/python -m pip install --upgrade pip
       - run: backend/.venv/bin/python -m pip install -r backend/requirements.txt
-      - run: cd backend && .venv/bin/python -m pytest tests -q
+      - name: Print backend environment
+        run: |
+          backend/.venv/bin/python --version
+          backend/.venv/bin/python -c "import platform, sys; print(platform.platform()); print(sys.executable)"
+          backend/.venv/bin/python -m pip freeze
+      - run: cd backend && .venv/bin/python -m pytest tests -q -ra

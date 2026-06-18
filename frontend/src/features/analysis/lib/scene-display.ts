@@ -89,6 +89,7 @@ export const ANALYSIS_FIELD_LABELS: Record<string, string> = {
   overall_composite_grade: "整体综合",
   overall_quality_grade: "整体质量",
   overall_summary: "整体摘要",
+  place_context: "地点判断",
   quality_metrics: "质量指标",
   reason: "原因",
   recording_mode: "录制模式",
@@ -98,6 +99,7 @@ export const ANALYSIS_FIELD_LABELS: Record<string, string> = {
   scene_group: "场景组",
   segment_analysis: "片段分析",
   segment_analysis_error: "片段分析错误",
+  segment_analysis_source: "判断来源",
   segment_type: "片段类型",
   shake_score: "抖动分",
   shot_type: "景别",
@@ -117,19 +119,26 @@ export const ANALYSIS_FIELD_LABELS: Record<string, string> = {
   video_codec_detail: "编码详情",
   video_count: "视频数",
   video_path: "原始路径",
+  visual_description: "画面描述",
+  scene_keywords: "场景关键词",
+  subject_keywords: "主体关键词",
   videos: "视频",
   vl_analysis: "视觉分析",
   xml_sidecar: "XML",
 };
 
 const VISUAL_KEYS = [
+  "visual_description",
   "shot_type",
   "subject",
   "subject_category",
+  "subject_keywords",
   "action",
   "action_type",
+  "place_context",
   "environment",
   "environment_type",
+  "scene_keywords",
   "lighting",
   "lighting_type",
   "color_tone",
@@ -142,16 +151,20 @@ const VISUAL_KEYS = [
 
 const DUPLICATE_VL_KEYS = new Set([
   "segment_type",
+  "visual_description",
   "shot_type",
   "camera_movement",
   "movement_confidence",
   "movement_evidence",
   "subject",
   "subject_category",
+  "subject_keywords",
   "action",
   "action_type",
+  "place_context",
   "environment",
   "environment_type",
+  "scene_keywords",
   "lighting",
   "lighting_type",
   "color_tone",
@@ -209,12 +222,15 @@ export function movementSampleLabel(value?: string, fallback = "采样"): string
     last: "尾帧",
     middle: "中间帧",
   };
+  const match = value?.match(/^sample_(\d+)$/);
+  if (match) return `采样 ${Number(match[1])}`;
   return value ? labels[value] ?? value : fallback;
 }
 
 export function movementMethodLabel(value?: string): string {
   const labels: Record<string, string> = {
     first_middle_last: "首帧/中间帧/尾帧",
+    adaptive_temporal_samples: "时序抽帧",
   };
   return value ? labels[value] ?? value : "";
 }
@@ -230,6 +246,25 @@ function entry(key: string, value: unknown): DetailEntry | null {
   return { key, label: analysisFieldLabel(key), value };
 }
 
+function comparisonValues(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.flatMap(comparisonValues);
+  }
+  if (value == null) return [];
+  return String(value)
+    .split(/[、,，]/)
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function sameDisplayValue(left: unknown, right: unknown): boolean {
+  const leftValues = comparisonValues(left);
+  const rightValues = comparisonValues(right);
+  if (leftValues.length === 0 || rightValues.length === 0) return false;
+  if (leftValues.length !== rightValues.length) return false;
+  return leftValues.every((value, index) => value === rightValues[index]);
+}
+
 function entriesFromRecord(
   record: Record<string, unknown> | null | undefined,
   keys?: string[],
@@ -241,6 +276,30 @@ function entriesFromRecord(
     .filter((key) => !omit?.has(key))
     .map((key) => entry(key, record[key]))
     .filter((item): item is DetailEntry => item !== null);
+}
+
+function dedupeVisualRows(rows: DetailEntry[], qualityIssues: unknown): DetailEntry[] {
+  const rowValue = new Map(rows.map((row) => [row.key, row.value]));
+  const hiddenKeys = new Set<string>();
+  const pairedKeys: Array<[string, string]> = [
+    ["subject", "subject_category"],
+    ["action", "action_type"],
+    ["environment", "environment_type"],
+    ["lighting", "lighting_type"],
+    ["color_tone", "color_tone_type"],
+    ["emotion_atmosphere", "emotion_tags"],
+  ];
+
+  for (const [readableKey, classifierKey] of pairedKeys) {
+    if (sameDisplayValue(rowValue.get(readableKey), rowValue.get(classifierKey))) {
+      hiddenKeys.add(classifierKey);
+    }
+  }
+  if (sameDisplayValue(rowValue.get("notable_details"), qualityIssues)) {
+    hiddenKeys.add("notable_details");
+  }
+
+  return rows.filter((row) => !hiddenKeys.has(row.key));
 }
 
 export function sceneAnalysisDisplay(scene: LegacyVisualAnalysisScene): SceneAnalysisDisplay {
@@ -264,13 +323,16 @@ export function sceneAnalysisDisplay(scene: LegacyVisualAnalysisScene): SceneAna
     entry("evidence", camera?.evidence ?? vl.movement_evidence),
   ].filter((item): item is DetailEntry => item !== null);
 
-  const visualRows = VISUAL_KEYS.map((key) => entry(key, visual?.[key as keyof typeof visual] ?? vl[key]))
-    .filter((item): item is DetailEntry => item !== null);
-
   const qualityRows = [
     entry("grade", quality?.grade ?? scene.quality_metrics?.grade),
     entry("issues", quality?.issues ?? scene.quality_metrics?.issues),
   ].filter((item): item is DetailEntry => item !== null);
+
+  const visualRows = dedupeVisualRows(
+    VISUAL_KEYS.map((key) => entry(key, visual?.[key as keyof typeof visual] ?? vl[key]))
+      .filter((item): item is DetailEntry => item !== null),
+    quality?.issues ?? scene.quality_metrics?.issues,
+  );
 
   if (segment?.edit_role || vl.edit_role) {
     visualRows.push({

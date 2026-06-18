@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
@@ -463,6 +464,7 @@ def test_worker_analysis_classifies_speech_segments_and_calls_video_vl(
                     "subject": "人物在店内讲解",
                     "action": "面对镜头说话",
                     "environment": "店铺室内",
+                    "place_context": "线下零售店",
                 },
                 "camera": {
                     "movement": "固定镜头",
@@ -475,11 +477,12 @@ def test_worker_analysis_classifies_speech_segments_and_calls_video_vl(
         return {
             "segment_type": "broll",
             "speech": {"has_speech": False, "summary": ""},
-            "visual": {
-                "subject": "产品陈列",
-                "action": "镜头扫过货架",
-                "environment": "店铺室内",
-            },
+                "visual": {
+                    "subject": "产品陈列",
+                    "action": "镜头扫过货架",
+                    "environment": "店铺室内",
+                    "place_context": "商品陈列区",
+                },
             "camera": {
                 "movement": "移镜头",
                 "movement_confidence": 0.81,
@@ -523,20 +526,633 @@ def test_worker_analysis_classifies_speech_segments_and_calls_video_vl(
     ]
     assert "欢迎来到这家店" in prompts[0]
     assert "segment_type: broll" in prompts[1]
-    scenes = project["analysis"]["legacySummary"]["videos"][0]["visual_analysis"]["scenes"]
+    video = project["analysis"]["legacySummary"]["videos"][0]
+    assert video["overall_quality_grade"] == "精选"
+    assert video["overall_composite_grade"] == "精选"
+    assert isinstance(video["analysis_time_seconds"], float)
+    assert video["analysis_time_seconds"] >= 0
+    assert video["analysis_time_str"].endswith("秒")
+    scenes = video["visual_analysis"]["scenes"]
     assert scenes[0]["segment_type"] == "aroll"
+    assert scenes[0]["segment_analysis_source"] == "video_vl"
     assert scenes[0]["speech"]["has_speech"] is True
     assert scenes[0]["speech"]["transcript"] == "欢迎来到这家店，今天介绍招牌产品。"
     assert scenes[0]["segment_analysis"]["camera"]["movement"] == "固定镜头"
     assert scenes[0]["vl_analysis"]["subject"] == "人物在店内讲解"
+    assert scenes[0]["vl_analysis"]["place_context"] == "线下零售店"
     assert scenes[0]["vl_analysis"]["camera_movement"] == "固定镜头"
     assert scenes[0]["vl_analysis"]["edit_role"] == "主叙事"
     assert scenes[1]["segment_type"] == "broll"
+    assert scenes[1]["segment_analysis_source"] == "video_vl"
     assert scenes[1]["speech"]["has_speech"] is False
     assert scenes[1]["segment_analysis"]["camera"]["movement"] == "移镜头"
     assert scenes[1]["vl_analysis"]["subject"] == "产品陈列"
     assert scenes[1]["vl_analysis"]["camera_movement"] == "移镜头"
     assert scenes[1]["vl_analysis"]["edit_role"] == "B-roll"
+
+
+def test_worker_analysis_generates_subtitles_before_video_vl_when_missing(
+    monkeypatch, tmp_path: Path
+):
+    client = _client_with_temp_state(monkeypatch, tmp_path)
+    from app.services import job_worker, whisper_service
+    from app.services.job_worker import process_next_job
+
+    project_folder = tmp_path / "project"
+    source_video = tmp_path / "clip.mp4"
+    project_folder.mkdir()
+    source_video.write_bytes(b"fake video")
+    client.post(
+        "/api/projects/init",
+        json={"folderPath": str(project_folder), "name": "Transcript First Demo"},
+    )
+    imported = client.post(
+        "/api/media/import",
+        json={
+            "folderPath": str(project_folder),
+            "filePaths": [str(source_video)],
+            "mode": "referenced",
+        },
+    ).json()["mediaItems"]
+    media_id = imported[0]["id"]
+    client.put(
+        "/api/settings/models",
+        json={
+            "configs": [
+                {
+                    "capability": "vl",
+                    "baseUrl": "http://127.0.0.1:8000/v1",
+                    "model": "local-vl",
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+    events = []
+    prompts = []
+
+    def fake_extract_audio_for_subtitles(_source_path, output_path):
+        events.append("extract_audio")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake wav")
+        return output_path
+
+    def fake_transcribe_audio(audio_path, **_kwargs):
+        events.append(f"transcribe:{Path(audio_path).name}")
+        return [
+            {"start": 0.0, "end": 1.4, "text": "第一句介绍门店招牌。"},
+            {"start": 1.4, "end": 3.0, "text": "第二句说明适合家庭聚会。"},
+        ]
+
+    def fake_extract_video_keyframes(video_path, output_dir):
+        frame = output_dir / "frames" / "frame_000.jpg"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(b"jpeg")
+        return {
+            "video": video_path.name,
+            "video_path": str(video_path),
+            "output_dir": str(output_dir),
+            "video_meta": {
+                "duration_seconds": 3.0,
+                "resolution": "1920x1080",
+                "fps": 30.0,
+            },
+            "visual_analysis": {
+                "model": "local-vl",
+                "total_scenes": 1,
+                "scenes": [
+                    {
+                        "index": 0,
+                        "start": 0.0,
+                        "end": 3.0,
+                        "duration": 3.0,
+                        "keyframe": str(frame),
+                        "quality_metrics": {"grade": "可用", "issues": []},
+                    }
+                ],
+            },
+        }
+
+    def fake_extract_video_segment_clip(_video_path, _start_sec, _end_sec, output_path):
+        events.append("segment_clip")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return output_path
+
+    def fake_describe_video_clip(_config, _clip_path, prompt):
+        events.append("describe_clip")
+        prompts.append(prompt)
+        return {
+            "segment_type": "aroll",
+            "speech": {"has_speech": True, "summary": "介绍门店招牌和聚会场景。"},
+            "visual": {"subject": "讲解者", "environment": "店内"},
+            "camera": {"movement": "固定镜头", "movement_confidence": 0.8, "evidence": "画面稳定"},
+            "quality": {"grade": "可用", "issues": []},
+            "edit_role": "主叙事",
+        }
+
+    def fail_describe_frame(_config, _image_path):
+        raise AssertionError("analysis should use video segment prompt after transcription")
+
+    monkeypatch.setattr(whisper_service, "ensure_ready", lambda: {"id": "model"})
+    monkeypatch.setattr(whisper_service, "transcribe_audio", fake_transcribe_audio)
+    monkeypatch.setattr(job_worker, "_extract_audio_for_subtitles", fake_extract_audio_for_subtitles)
+    monkeypatch.setattr(job_worker, "extract_video_keyframes", fake_extract_video_keyframes)
+    monkeypatch.setattr(job_worker, "extract_video_segment_clip", fake_extract_video_segment_clip)
+    monkeypatch.setattr(job_worker, "describe_video_clip", fake_describe_video_clip)
+    monkeypatch.setattr(job_worker, "describe_frame", fail_describe_frame)
+    create_response = client.post(
+        "/api/analysis/jobs",
+        json={"projectFolder": str(project_folder), "mediaIds": []},
+    )
+
+    process_next_job()
+    response = client.get(f"/api/jobs/{create_response.json()['job']['id']}")
+    project = client.post(
+        "/api/projects/open",
+        json={"folderPath": str(project_folder)},
+    ).json()["project"]
+
+    assert response.json()["job"]["status"] == "completed"
+    assert events == ["extract_audio", "transcribe:source.wav", "segment_clip", "describe_clip"]
+    assert project["subtitles"]["segments"][0]["mediaId"] == media_id
+    assert [segment["text"] for segment in project["subtitles"]["segments"]] == [
+        "第一句介绍门店招牌。",
+        "第二句说明适合家庭聚会。",
+    ]
+    assert "第一句介绍门店招牌" in prompts[0]
+    scene = project["analysis"]["legacySummary"]["videos"][0]["visual_analysis"]["scenes"][0]
+    assert scene["segment_type"] == "aroll"
+    assert scene["speech"]["transcript"] == "第一句介绍门店招牌。 第二句说明适合家庭聚会。"
+
+
+def test_worker_analysis_reuses_existing_subtitle_file_without_transcribing(
+    monkeypatch, tmp_path: Path
+):
+    client = _client_with_temp_state(monkeypatch, tmp_path)
+    from app.services import job_worker, whisper_service
+    from app.services.job_worker import process_next_job
+
+    project_folder = tmp_path / "project"
+    source_video = tmp_path / "clip.mp4"
+    project_folder.mkdir()
+    source_video.write_bytes(b"fake video")
+    client.post(
+        "/api/projects/init",
+        json={"folderPath": str(project_folder), "name": "Existing Subtitle File Demo"},
+    )
+    imported = client.post(
+        "/api/media/import",
+        json={
+            "folderPath": str(project_folder),
+            "filePaths": [str(source_video)],
+            "mode": "referenced",
+        },
+    ).json()["mediaItems"]
+    media_id = imported[0]["id"]
+    subtitle_file = project_folder / "subtitles" / "existing-subtitles.json"
+    subtitle_file.parent.mkdir(parents=True, exist_ok=True)
+    subtitle_file.write_text(
+        json.dumps(
+            {
+                "segments": [
+                    {
+                        "id": "subtitle-existing-1",
+                        "mediaId": media_id,
+                        "startFrame": 0,
+                        "endFrame": 75,
+                        "text": "这是已经识别好的字幕。",
+                        "speaker": "",
+                    }
+                ],
+                "errors": [],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    client.put(
+        "/api/settings/models",
+        json={
+            "configs": [
+                {
+                    "capability": "vl",
+                    "baseUrl": "http://127.0.0.1:8000/v1",
+                    "model": "local-vl",
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+    prompts = []
+
+    def fail_transcribe_audio(*_args, **_kwargs):
+        raise AssertionError("analysis should reuse existing subtitle files")
+
+    def fake_extract_video_keyframes(video_path, output_dir):
+        frame = output_dir / "frames" / "frame_000.jpg"
+        frame.parent.mkdir(parents=True, exist_ok=True)
+        frame.write_bytes(b"jpeg")
+        return {
+            "video": video_path.name,
+            "video_path": str(video_path),
+            "output_dir": str(output_dir),
+            "video_meta": {
+                "duration_seconds": 3.0,
+                "resolution": "1920x1080",
+                "fps": 25.0,
+            },
+            "visual_analysis": {
+                "model": "local-vl",
+                "total_scenes": 1,
+                "scenes": [
+                    {
+                        "index": 0,
+                        "start": 0.0,
+                        "end": 3.0,
+                        "duration": 3.0,
+                        "keyframe": str(frame),
+                        "quality_metrics": {"grade": "可用", "issues": []},
+                    }
+                ],
+            },
+        }
+
+    def fake_extract_video_segment_clip(_video_path, _start_sec, _end_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return output_path
+
+    def fake_describe_video_clip(_config, _clip_path, prompt):
+        prompts.append(prompt)
+        return {
+            "segment_type": "aroll",
+            "speech": {"has_speech": True, "summary": "复用已有字幕。"},
+            "visual": {"subject": "讲解者"},
+            "camera": {"movement": "固定镜头", "movement_confidence": 0.8, "evidence": "画面稳定"},
+            "quality": {"grade": "可用", "issues": []},
+            "edit_role": "主叙事",
+        }
+
+    def fail_describe_frame(_config, _image_path):
+        raise AssertionError("analysis should use video segment prompt with subtitle file text")
+
+    monkeypatch.setattr(whisper_service, "ensure_ready", lambda: {"id": "model"})
+    monkeypatch.setattr(whisper_service, "transcribe_audio", fail_transcribe_audio)
+    monkeypatch.setattr(job_worker, "extract_video_keyframes", fake_extract_video_keyframes)
+    monkeypatch.setattr(job_worker, "extract_video_segment_clip", fake_extract_video_segment_clip)
+    monkeypatch.setattr(job_worker, "describe_video_clip", fake_describe_video_clip)
+    monkeypatch.setattr(job_worker, "describe_frame", fail_describe_frame)
+    create_response = client.post(
+        "/api/analysis/jobs",
+        json={"projectFolder": str(project_folder), "mediaIds": []},
+    )
+
+    process_next_job()
+    response = client.get(f"/api/jobs/{create_response.json()['job']['id']}")
+    project = client.post(
+        "/api/projects/open",
+        json={"folderPath": str(project_folder)},
+    ).json()["project"]
+
+    assert response.json()["job"]["status"] == "completed"
+    assert "这是已经识别好的字幕" in prompts[0]
+    assert project["subtitles"]["segments"][0]["text"] == "这是已经识别好的字幕。"
+    scene = project["analysis"]["legacySummary"]["videos"][0]["visual_analysis"]["scenes"][0]
+    assert scene["speech"]["transcript"] == "这是已经识别好的字幕。"
+
+
+def test_worker_analysis_marks_frame_fallback_when_video_vl_json_fails(
+    monkeypatch, tmp_path: Path
+):
+    client = _client_with_temp_state(monkeypatch, tmp_path)
+    from app.services import job_worker
+    from app.services.job_worker import process_next_job
+
+    project_folder = tmp_path / "project"
+    source_video = tmp_path / "clip.mp4"
+    project_folder.mkdir()
+    source_video.write_bytes(b"fake video")
+    client.post(
+        "/api/projects/init",
+        json={"folderPath": str(project_folder), "name": "Fallback Demo"},
+    )
+    client.post(
+        "/api/media/import",
+        json={
+            "folderPath": str(project_folder),
+            "filePaths": [str(source_video)],
+            "mode": "referenced",
+        },
+    )
+    client.put(
+        "/api/settings/models",
+        json={
+            "configs": [
+                {
+                    "capability": "vl",
+                    "baseUrl": "http://127.0.0.1:8000/v1",
+                    "model": "local-vl",
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+
+    def fake_extract_video_keyframes(video_path, output_dir):
+        frames_dir = output_dir / "frames"
+        initial_labels = ["sample_01", "sample_03", "sample_05", "sample_07", "sample_09"]
+        frame_paths = [frames_dir / f"frame_000_{label}.jpg" for label in initial_labels]
+        for frame in frame_paths:
+            frame.parent.mkdir(parents=True, exist_ok=True)
+            frame.write_bytes(b"jpeg")
+        return {
+            "video": video_path.name,
+            "video_path": str(video_path),
+            "video_meta": {"duration_seconds": 2.0, "fps": 30.0},
+            "visual_analysis": {
+                "model": "local-vl",
+                "total_scenes": 1,
+                "scenes": [
+                    {
+                        "index": 0,
+                        "start": 0.0,
+                        "end": 2.0,
+                        "duration": 2.0,
+                        "keyframe": str(frame_paths[2]),
+                        "movement_probe": {
+                            "method": "adaptive_temporal_samples",
+                            "samples": [
+                                {
+                                    "label": f"sample_{index:02d}",
+                                    "time": round(0.2 + index * 0.3, 2),
+                                    "frame": str(frame),
+                                }
+                                for index, frame in enumerate(frame_paths, start=1)
+                            ],
+                        },
+                        "quality_metrics": {"grade": "可用", "issues": []},
+                    }
+                ],
+            },
+        }
+
+    def fake_extract_video_segment_clip(video_path, start_sec, end_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return output_path
+
+    def fail_describe_video_clip(_config, _clip_path, _prompt):
+        raise RuntimeError("Model response was not valid JSON")
+
+    described_sequences = []
+
+    def fake_describe_frame(_config, _image_path):
+        raise AssertionError("frame fallback should analyze the ordered frame sequence once")
+
+    def fake_describe_frame_sequence(config, frames, prompt):
+        described_sequences.append((config.model, frames, prompt))
+        return {
+            "visual": {
+                "shot_type": "近景",
+                "subject": "桌上的咖啡杯",
+            },
+            "camera": {
+                "movement": "推镜头",
+                "movement_confidence": 0.82,
+                "evidence": "咖啡杯在按时间排序的采样帧中逐渐变大，背景边缘向外扩张。",
+            },
+            "edit_role": "B-roll",
+        }
+
+    monkeypatch.setattr(job_worker, "extract_video_keyframes", fake_extract_video_keyframes)
+    monkeypatch.setattr(
+        job_worker,
+        "extract_video_segment_clip",
+        fake_extract_video_segment_clip,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        job_worker,
+        "describe_video_clip",
+        fail_describe_video_clip,
+        raising=False,
+    )
+    monkeypatch.setattr(job_worker, "describe_frame", fake_describe_frame)
+    monkeypatch.setattr(job_worker, "describe_frame_sequence", fake_describe_frame_sequence)
+    create_response = client.post(
+        "/api/analysis/jobs",
+        json={"projectFolder": str(project_folder), "mediaIds": []},
+    )
+
+    process_next_job()
+    response = client.get(f"/api/jobs/{create_response.json()['job']['id']}")
+    project_response = client.post("/api/projects/open", json={"folderPath": str(project_folder)})
+    project = project_response.json()["project"]
+
+    assert response.json()["job"]["status"] == "completed"
+    assert len(described_sequences) == 1
+    _model, sequence_frames, sequence_prompt = described_sequences[0]
+    assert [frame["label"] for frame in sequence_frames] == [
+        "sample_01",
+        "sample_02",
+        "sample_03",
+        "sample_04",
+        "sample_05",
+    ]
+    assert [frame["time"] for frame in sequence_frames] == sorted(frame["time"] for frame in sequence_frames)
+    assert "ordered_frames" in sequence_prompt
+    assert "按时间顺序" in sequence_prompt
+    scene = project["analysis"]["legacySummary"]["videos"][0]["visual_analysis"]["scenes"][0]
+    assert scene["segment_analysis_source"] == "frame_fallback"
+    assert scene["segment_analysis_error"] == "Model response was not valid JSON"
+    assert scene["vl_analysis"]["subject"] == "桌上的咖啡杯"
+    assert scene["segment_analysis"]["camera"]["movement"] == "推镜头"
+    assert [
+        sample["camera_movement"]
+        for sample in scene["movement_probe"]["samples"]
+    ] == ["推镜头", "推镜头", "推镜头", "推镜头", "推镜头"]
+
+
+def test_worker_analysis_expands_temporal_samples_only_when_sequence_is_uncertain(
+    monkeypatch, tmp_path: Path
+):
+    client = _client_with_temp_state(monkeypatch, tmp_path)
+    from app.services import job_worker
+    from app.services.job_worker import process_next_job
+
+    project_folder = tmp_path / "project"
+    source_video = tmp_path / "clip.mp4"
+    project_folder.mkdir()
+    source_video.write_bytes(b"fake video")
+    client.post(
+        "/api/projects/init",
+        json={"folderPath": str(project_folder), "name": "Staged Fallback Demo"},
+    )
+    client.post(
+        "/api/media/import",
+        json={
+            "folderPath": str(project_folder),
+            "filePaths": [str(source_video)],
+            "mode": "referenced",
+        },
+    )
+    client.put(
+        "/api/settings/models",
+        json={
+            "configs": [
+                {
+                    "capability": "vl",
+                    "baseUrl": "http://127.0.0.1:8000/v1",
+                    "model": "local-vl",
+                    "enabled": True,
+                }
+            ]
+        },
+    )
+
+    def fake_extract_video_keyframes(video_path, output_dir):
+        frames_dir = output_dir / "frames"
+        initial_labels = ["sample_01", "sample_03", "sample_05", "sample_07", "sample_09"]
+        frame_paths = [frames_dir / f"frame_000_{label}.jpg" for label in initial_labels]
+        for frame in frame_paths:
+            frame.parent.mkdir(parents=True, exist_ok=True)
+            frame.write_bytes(b"jpeg")
+        return {
+            "video": video_path.name,
+            "video_path": str(video_path),
+            "output_dir": str(output_dir),
+            "video_meta": {"duration_seconds": 15.0, "fps": 30.0},
+            "visual_analysis": {
+                "model": "local-vl",
+                "total_scenes": 1,
+                "scenes": [
+                    {
+                        "index": 0,
+                        "start": 0.0,
+                        "end": 15.0,
+                        "duration": 15.0,
+                        "keyframe": str(frame_paths[2]),
+                        "movement_probe": {
+                            "method": "adaptive_temporal_samples",
+                            "samples": [
+                                {
+                                    "label": label,
+                                    "time": time_sec,
+                                    "frame": str(frame),
+                                }
+                                for label, time_sec, frame in zip(
+                                    initial_labels,
+                                    [0.1, 3.8, 7.5, 11.2, 14.9],
+                                    frame_paths,
+                                )
+                            ],
+                        },
+                        "quality_metrics": {"grade": "可用", "issues": []},
+                    }
+                ],
+            },
+        }
+
+    def fake_extract_video_segment_clip(_video_path, _start_sec, _end_sec, output_path):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"clip")
+        return output_path
+
+    def fail_describe_video_clip(_config, _clip_path, _prompt):
+        raise RuntimeError("Model response was not valid JSON")
+
+    def fail_describe_frame(_config, _image_path):
+        raise AssertionError("staged fallback should not return to per-frame VL")
+
+    def fake_expanded_scene_probe_times(_scene, _video_duration):
+        return [
+            {"label": f"sample_{index:02d}", "time": time_sec}
+            for index, time_sec in enumerate(
+                [0.1, 1.95, 3.8, 5.65, 7.5, 9.35, 11.2, 13.05, 14.9],
+                start=1,
+            )
+        ]
+
+    extracted_extra_frames = []
+
+    def fake_extract_keyframe(_video_path, time_sec, output_path, size=(720, 404), color_transform=None):
+        extracted_extra_frames.append((round(time_sec, 2), output_path.name))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"jpeg")
+
+    described_sequences = []
+
+    def fake_describe_frame_sequence(_config, frames, prompt):
+        described_sequences.append(([frame["label"] for frame in frames], prompt))
+        if len(described_sequences) == 1:
+            return {
+                "visual": {"shot_type": "中景", "subject": "街道"},
+                "camera": {
+                    "movement": "不确定",
+                    "movement_confidence": 0.2,
+                    "evidence": "初始采样不足以判断。",
+                },
+                "edit_role": "B-roll",
+            }
+        return {
+            "visual": {"shot_type": "中景", "subject": "街道"},
+            "camera": {
+                "movement": "移镜头",
+                "movement_confidence": 0.78,
+                "evidence": "扩展采样中背景连续横向位移。",
+            },
+            "edit_role": "B-roll",
+        }
+
+    monkeypatch.setattr(job_worker, "extract_video_keyframes", fake_extract_video_keyframes)
+    monkeypatch.setattr(job_worker, "extract_video_segment_clip", fake_extract_video_segment_clip)
+    monkeypatch.setattr(job_worker, "describe_video_clip", fail_describe_video_clip)
+    monkeypatch.setattr(job_worker, "describe_frame", fail_describe_frame)
+    monkeypatch.setattr(job_worker, "expanded_scene_probe_times", fake_expanded_scene_probe_times)
+    monkeypatch.setattr(job_worker, "extract_keyframe", fake_extract_keyframe)
+    monkeypatch.setattr(job_worker, "describe_frame_sequence", fake_describe_frame_sequence)
+    create_response = client.post(
+        "/api/analysis/jobs",
+        json={"projectFolder": str(project_folder), "mediaIds": []},
+    )
+
+    process_next_job()
+    response = client.get(f"/api/jobs/{create_response.json()['job']['id']}")
+    project = client.post(
+        "/api/projects/open",
+        json={"folderPath": str(project_folder)},
+    ).json()["project"]
+
+    assert response.json()["job"]["status"] == "completed"
+    assert len(described_sequences) == 2
+    assert described_sequences[0][0] == [
+        "sample_01",
+        "sample_03",
+        "sample_05",
+        "sample_07",
+        "sample_09",
+    ]
+    assert described_sequences[1][0] == [
+        "sample_01",
+        "sample_02",
+        "sample_03",
+        "sample_04",
+        "sample_05",
+        "sample_06",
+        "sample_07",
+        "sample_08",
+        "sample_09",
+    ]
+    assert [name for _time, name in extracted_extra_frames] == [
+        "frame_000_sample_02.jpg",
+        "frame_000_sample_04.jpg",
+        "frame_000_sample_06.jpg",
+        "frame_000_sample_08.jpg",
+    ]
+    scene = project["analysis"]["legacySummary"]["videos"][0]["visual_analysis"]["scenes"][0]
+    assert scene["segment_analysis"]["camera"]["movement"] == "移镜头"
+    assert len(scene["movement_probe"]["samples"]) == 9
 
 
 def test_worker_analysis_extracts_keyframes_and_calls_vl(
@@ -617,25 +1233,38 @@ def test_worker_analysis_extracts_keyframes_and_calls_vl(
             },
         }
 
-    def fake_describe_frame(config, image_path):
-        described.append((config.model, image_path.name))
+    def fake_describe_frame(_config, _image_path):
+        raise AssertionError("analysis should use ordered frame sequence fallback")
+
+    def fake_describe_frame_sequence(config, frames, prompt):
+        described.append((config.model, [Path(str(frame["frame"])).name for frame in frames], prompt))
         return {
-            "shot_type": "中景",
-            "camera_movement": "固定镜头",
-            "subject": "人物站在室内",
-            "subject_category": "人物",
-            "action_type": "无明显动作",
-            "environment_type": "室内空间",
-            "lighting_type": "柔和光",
-            "color_tone_type": "暖色调",
-            "emotion_tags": ["宁静", "温暖"],
+            "visual": {
+                "visual_description": "画面中一位讲解者站在温暖的室内空间，身后有产品陈列和柔和灯光，整体适合作为介绍段落。",
+                "shot_type": "中景",
+                "subject": "人物站在室内",
+                "subject_category": "人物",
+                "subject_keywords": ["讲解者", "产品陈列"],
+                "action_type": "无明显动作",
+                "environment_type": "室内空间",
+                "scene_keywords": ["温暖室内", "陈列空间"],
+                "lighting_type": "柔和光",
+                "color_tone_type": "暖色调",
+                "emotion_tags": ["宁静", "温暖"],
+                "search_keywords": ["人物", "室内", "开场", "讲解者", "产品陈列", "温暖室内"],
+            },
+            "camera": {
+                "movement": "固定镜头",
+                "movement_confidence": 0.86,
+                "evidence": "按时间排序的采样帧中人物和背景位置稳定。",
+            },
             "edit_role": "开场建立",
-            "search_keywords": ["人物", "室内", "开场"],
             "edit_suggestion": "适合作为开场",
         }
 
     monkeypatch.setattr(job_worker, "extract_video_keyframes", fake_extract_video_keyframes)
     monkeypatch.setattr(job_worker, "describe_frame", fake_describe_frame)
+    monkeypatch.setattr(job_worker, "describe_frame_sequence", fake_describe_frame_sequence)
     create_response = client.post(
         "/api/analysis/jobs",
         json={"projectFolder": str(project_folder), "mediaIds": []},
@@ -648,10 +1277,13 @@ def test_worker_analysis_extracts_keyframes_and_calls_vl(
 
     assert response.json()["job"]["status"] == "completed"
     assert described == [
-        ("local-vl", "frame_000_first.jpg"),
-        ("local-vl", "frame_000.jpg"),
-        ("local-vl", "frame_000_last.jpg"),
+        (
+            "local-vl",
+            ["frame_000_first.jpg", "frame_000.jpg", "frame_000_last.jpg"],
+            described[0][2],
+        ),
     ]
+    assert "ordered_frames" in described[0][2]
     assert project["analysis"]["legacySummary"]["taxonomy_version"] == "v1"
     scene = project["analysis"]["legacySummary"]["videos"][0]["visual_analysis"]["scenes"][0]
     assert scene["vl_analysis"]["subject"] == "人物站在室内"
@@ -664,8 +1296,20 @@ def test_worker_analysis_extracts_keyframes_and_calls_vl(
         ("last", "固定镜头"),
     ]
     assert scene["vl_analysis"]["subject_category"] == "人物"
+    assert scene["vl_analysis"]["visual_description"].startswith("画面中一位讲解者")
+    assert scene["vl_analysis"]["subject_keywords"] == ["讲解者", "产品陈列"]
+    assert scene["vl_analysis"]["scene_keywords"] == ["温暖室内", "陈列空间"]
     assert scene["vl_analysis"]["emotion_tags"] == ["宁静", "温暖"]
-    assert scene["vl_analysis"]["search_keywords"] == ["人物", "室内", "开场"]
+    assert scene["vl_analysis"]["search_keywords"] == ["人物", "室内", "开场", "讲解者", "产品陈列", "温暖室内"]
+    assert project["analysis"]["keywordDictionary"] == [
+        "讲解者",
+        "产品陈列",
+        "温暖室内",
+        "陈列空间",
+        "人物",
+        "室内",
+        "开场",
+    ]
     assert project["analysis"]["sceneCount"] == 1
 
 

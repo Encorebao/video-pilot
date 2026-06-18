@@ -12,17 +12,24 @@ from app.core.project_paths import ensure_project_subdirs
 from app.repositories.jobs import claim_next_queued_job, update_job
 from app.repositories.model_configs import get_model_runtime_config
 from app.schemas.jobs import JobPublic
-from app.services.analysis_merge import legacy_scene_count, merge_legacy_summaries
+from app.services.analysis_merge import build_keyword_dictionary, legacy_scene_count, merge_legacy_summaries
 from app.services.analysis_taxonomy import taxonomy_prompt_lines, taxonomy_version
-from app.services.frame_extraction import extract_video_keyframes, extract_video_segment_clip
+from app.services.frame_extraction import (
+    expanded_scene_probe_times,
+    extract_keyframe,
+    extract_video_keyframes,
+    extract_video_segment_clip,
+)
 from app.services.fcpxml_export import write_fcpxml
 from app.services.openai_compatible import (
     describe_frame,
+    describe_frame_sequence,
     describe_video_clip,
     generate_analysis_summary,
     require_runtime_config,
 )
 from app.services.project_manifest import open_project, save_project
+from app.services.quality_metrics import contextualize_quality_for_shot_type
 from app.services.project_cache import clear_subtitle_job_cache, subtitle_job_cache_dir
 from app.services import script_edit, whisper_service
 
@@ -50,6 +57,7 @@ def _media_source_path(project_folder: Path, item: dict) -> Path:
 
 ANALYSIS_STAGE_LABELS = {
     "queued": "排队",
+    "transcribing": "生成字幕",
     "extracting": "抽帧",
     "vision": "AI识别",
     "summarizing": "总结",
@@ -137,6 +145,66 @@ def _completed_media_ids(items: list[dict[str, Any]]) -> list[str]:
         for item in items
         if item.get("mediaId") and item.get("status") == "completed"
     ]
+
+
+def _subtitle_segments_by_media(segments: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        media_id = str(segment.get("mediaId") or "")
+        text = str(segment.get("text") or "").strip()
+        if not media_id or not text:
+            continue
+        grouped.setdefault(media_id, []).append(segment)
+    return grouped
+
+
+def _subtitle_segment_key(segment: dict) -> tuple[str, str, str, str]:
+    return (
+        str(segment.get("mediaId") or ""),
+        str(segment.get("startFrame") or 0),
+        str(segment.get("endFrame") or 0),
+        str(segment.get("text") or "").strip(),
+    )
+
+
+def _merge_unique_subtitle_segments(existing: list[dict], additions: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for segment in [*existing, *additions]:
+        if not isinstance(segment, dict):
+            continue
+        media_id = str(segment.get("mediaId") or "")
+        text = str(segment.get("text") or "").strip()
+        if not media_id or not text:
+            continue
+        key = _subtitle_segment_key(segment)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(segment)
+    return merged
+
+
+def _load_subtitle_segments_from_files(project_folder: Path) -> list[dict]:
+    segments: list[dict] = []
+    subtitles_dir = project_folder / "subtitles"
+    if not subtitles_dir.exists():
+        return segments
+
+    for path in sorted(subtitles_dir.glob("*.json")):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        raw_segments = data.get("segments") if isinstance(data, dict) else data
+        if not isinstance(raw_segments, list):
+            continue
+        for segment in raw_segments:
+            if isinstance(segment, dict):
+                segments.append(segment)
+    return segments
 
 
 def _analysis_progress(item_index: int, total: int, item_fraction: float) -> int:
@@ -250,27 +318,255 @@ def _summarize_video_from_scenes(video_result: dict) -> str:
     return " ".join(parts)
 
 
-def _describe_scene_probe_samples(scene: dict, vl_config) -> None:
+GRADE_SCORES = {
+    "精选": 4.0,
+    "可用": 3.0,
+    "备选": 2.0,
+    "废片": 1.0,
+}
+
+
+def _grade_from_score(score: float) -> str:
+    if score >= 3.5:
+        return "精选"
+    if score >= 2.5:
+        return "可用"
+    if score >= 1.5:
+        return "备选"
+    return "废片"
+
+
+def _scene_grade(scene: dict[str, Any], *paths: tuple[str, ...]) -> str:
+    for path in paths:
+        value: Any = scene
+        for key in path:
+            if not isinstance(value, dict):
+                value = None
+                break
+            value = value.get(key)
+        grade = str(value or "").strip()
+        if grade:
+            return grade
+    return ""
+
+
+def _weighted_scene_grade(scenes: list[dict], *paths: tuple[str, ...]) -> str:
+    weighted_total = 0.0
+    weight_total = 0.0
+    for scene in scenes:
+        if not isinstance(scene, dict):
+            continue
+        grade = _scene_grade(scene, *paths)
+        score = GRADE_SCORES.get(grade)
+        if score is None:
+            continue
+        weight = float(scene.get("duration") or 0.0)
+        if weight <= 0:
+            weight = 1.0
+        weighted_total += score * weight
+        weight_total += weight
+    if weight_total <= 0:
+        return ""
+    return _grade_from_score(weighted_total / weight_total)
+
+
+def _format_elapsed_seconds(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.2f} 秒"
+    minutes = int(seconds // 60)
+    remaining = seconds - minutes * 60
+    return f"{minutes} 分 {remaining:.1f} 秒"
+
+
+def _finalize_video_analysis_metadata(video_result: dict, elapsed_seconds: float) -> None:
+    scenes = video_result.get("visual_analysis", {}).get("scenes", [])
+    if not isinstance(scenes, list):
+        scenes = []
+    video_result["overall_quality_grade"] = _weighted_scene_grade(
+        scenes,
+        ("segment_analysis", "quality", "grade"),
+        ("quality", "grade"),
+        ("quality_metrics", "grade"),
+    )
+    video_result["overall_composite_grade"] = _weighted_scene_grade(
+        scenes,
+        ("composite_grade",),
+        ("segment_analysis", "quality", "grade"),
+        ("quality", "grade"),
+        ("quality_metrics", "grade"),
+    )
+    video_result["analysis_time_seconds"] = round(max(0.0, elapsed_seconds), 2)
+    video_result["analysis_time_str"] = _format_elapsed_seconds(video_result["analysis_time_seconds"])
+
+
+def _ordered_probe_samples(scene: dict[str, Any]) -> list[dict[str, Any]]:
     samples = scene.get("movement_probe", {}).get("samples", [])
-    if not isinstance(samples, list) or not samples:
+    if not isinstance(samples, list):
+        return []
+    ordered_samples = [
+        sample
+        for sample in samples
+        if isinstance(sample, dict) and sample.get("frame")
+    ]
+    ordered_samples.sort(key=lambda item: float(item.get("time") or 0.0))
+    return ordered_samples
+
+
+def _build_frame_sequence_segment_prompt(
+    scene: dict[str, Any],
+    *,
+    segment_type: str,
+    transcript: str,
+    samples: list[dict[str, Any]],
+) -> str:
+    ordered_frames = [
+        {
+            "index": index,
+            "label": sample.get("label"),
+            "time": sample.get("time"),
+        }
+        for index, sample in enumerate(samples, start=1)
+    ]
+    return (
+        _build_video_segment_prompt(
+            scene,
+            segment_type=segment_type,
+            transcript=transcript,
+        )
+        + "\n"
+        + f"ordered_frames: {json.dumps(ordered_frames, ensure_ascii=False)}\n"
+        + "运镜判断必须按时间顺序阅读 ordered_frames：比较主体、背景、构图边缘和景别在连续采样帧中的变化。"
+        + "camera.movement 必须基于多帧可见变化给出；如果这些帧仍不足以判断，再输出“不确定”。"
+        + "不要因为单帧不可判断就否定时序运镜。"
+    )
+
+
+def _camera_movement_value(raw_analysis: dict[str, Any]) -> str:
+    camera = _dict_value(raw_analysis.get("camera"))
+    return str(camera.get("movement") or raw_analysis.get("camera_movement") or "").strip()
+
+
+def _is_uncertain_movement(raw_analysis: dict[str, Any]) -> bool:
+    movement = _camera_movement_value(raw_analysis)
+    if not movement:
+        return True
+    uncertain_markers = (
+        "不确定",
+        "无法判断",
+        "不能判断",
+        "不可判断",
+        "单帧不可判断",
+        "unknown",
+        "uncertain",
+    )
+    movement_lower = movement.lower()
+    return any(marker in movement_lower for marker in uncertain_markers)
+
+
+def _ensure_expanded_probe_samples(
+    scene: dict[str, Any],
+    *,
+    source_path: Path,
+    output_dir: Path,
+    video_duration: float,
+    frame_color_transform: dict[str, Any],
+) -> list[dict[str, Any]]:
+    samples = _ordered_probe_samples(scene)
+    existing_by_label = {
+        str(sample.get("label") or ""): sample
+        for sample in samples
+        if isinstance(sample, dict) and sample.get("label")
+    }
+    expanded_probes = expanded_scene_probe_times(scene, video_duration)
+    if len(expanded_probes) <= len(samples):
+        return samples
+
+    scene_index = int(scene.get("index") or 0)
+    frames_dir = output_dir / "frames"
+    for probe in expanded_probes:
+        label = str(probe.get("label") or "")
+        if not label or label in existing_by_label:
+            continue
+        frame_path = frames_dir / f"frame_{scene_index:03d}_{label}.jpg"
+        extract_keyframe(
+            source_path,
+            float(probe.get("time") or 0.0),
+            frame_path,
+            color_transform=frame_color_transform,
+        )
+        sample = {
+            "label": label,
+            "time": round(float(probe.get("time") or 0.0), 2),
+            "frame": str(frame_path),
+        }
+        samples.append(sample)
+        existing_by_label[label] = sample
+
+    samples.sort(key=lambda item: float(item.get("time") or 0.0))
+    scene.setdefault("movement_probe", {})["samples"] = samples
+    return samples
+
+
+def _describe_scene_probe_samples(
+    scene: dict[str, Any],
+    vl_config,
+    *,
+    segment_type: str,
+    transcript: str,
+    source_path: Path,
+    output_dir: Path,
+    video_duration: float,
+    frame_color_transform: dict[str, Any],
+) -> dict[str, Any]:
+    samples = _ordered_probe_samples(scene)
+    if not samples:
         keyframe = scene.get("keyframe")
         if keyframe:
             scene["vl_analysis"] = describe_frame(vl_config, Path(str(keyframe)))
-        return
+            return _dict_value(scene.get("vl_analysis"))
+        return {}
+
+    prompt = _build_frame_sequence_segment_prompt(
+        scene,
+        segment_type=segment_type,
+        transcript=transcript,
+        samples=samples,
+    )
+    try:
+        raw_analysis = describe_frame_sequence(vl_config, samples, prompt)
+        if not _is_uncertain_movement(raw_analysis):
+            return raw_analysis
+        expanded_samples = _ensure_expanded_probe_samples(
+            scene,
+            source_path=source_path,
+            output_dir=output_dir,
+            video_duration=video_duration,
+            frame_color_transform=frame_color_transform,
+        )
+        if len(expanded_samples) <= len(samples):
+            return raw_analysis
+        expanded_prompt = _build_frame_sequence_segment_prompt(
+            scene,
+            segment_type=segment_type,
+            transcript=transcript,
+            samples=expanded_samples,
+        )
+        return describe_frame_sequence(vl_config, expanded_samples, expanded_prompt)
+    except (OSError, RuntimeError, subprocess.CalledProcessError):
+        pass
 
     middle_analysis: dict | None = None
     fallback_analysis: dict | None = None
     for sample in samples:
-        if not isinstance(sample, dict) or not sample.get("frame"):
-            continue
         analysis = describe_frame(vl_config, Path(str(sample["frame"])))
         sample["camera_movement"] = str(analysis.get("camera_movement") or "")
         if fallback_analysis is None:
             fallback_analysis = analysis
-        if sample.get("label") == "middle":
+        if sample.get("frame") == scene.get("keyframe"):
             middle_analysis = analysis
 
     scene["vl_analysis"] = middle_analysis or fallback_analysis or {}
+    return _dict_value(scene.get("vl_analysis"))
 
 
 def _scene_time_bounds(scene: dict[str, Any], video_duration: float) -> tuple[float, float]:
@@ -340,13 +636,19 @@ def _build_video_segment_prompt(
         f"scene_time_seconds: {scene_start:.2f}-{scene_end:.2f}\n"
         f"subtitle_transcript: {transcript or '无字幕/无人声'}\n"
         f"frame_quality_reference: {json.dumps(quality_metrics, ensure_ascii=False)}\n"
-        "枚举字段尽量从下面字典值中选择；无法判断时写“不确定”。\n"
+        "先用约 200 字描述当前画面内容。枚举字段尽量从下面字典值中选择；无法判断时写“不确定”。\n"
         f"{taxonomy_lines}\n"
+        "subject_keywords 输出 2-6 个画面主体/内容关键词；"
+        "place_context 输出视觉判断出的具体地点/场所/空间类型，例如咖啡店、办公室、街边、家中厨房，无法判断写“不确定”；"
+        "scene_keywords 输出 2-6 个场景环境关键词；"
+        "search_keywords 输出 8-16 个素材检索关键词，允许模型自由生成，不要受枚举字典限制。\n"
+        "判断质量时，如果景别是特写或极特写，不要把正常浅景深、背景焦外虚化单独判为废片；"
+        "只有主体明显失焦或同时存在过曝、欠曝、过暗、抖动等问题时才降低等级。\n"
         "输出 schema："
         "{"
         '"segment_type":"aroll 或 broll",'
         '"speech":{"has_speech":true,"summary":"口播内容摘要，broll 为空字符串"},'
-        '"visual":{"shot_type":"景别","subject":"主体","subject_category":"主体类型枚举","action":"动作","action_type":"动作枚举","environment":"环境","environment_type":"环境枚举","lighting":"光线","lighting_type":"光线枚举","color_tone":"色调","color_tone_type":"色调枚举","emotion_atmosphere":"氛围","emotion_tags":["情绪枚举"],"search_keywords":["检索关键词"],"notable_details":"细节或 null"},'
+        '"visual":{"visual_description":"约 200 字画面描述","shot_type":"景别","subject":"主体","subject_category":"主体类型枚举","subject_keywords":["主体关键词"],"action":"动作","action_type":"动作枚举","place_context":"视觉判断出的具体地点/场所/空间类型","environment":"环境","environment_type":"环境枚举","scene_keywords":["场景关键词"],"lighting":"光线","lighting_type":"光线枚举","color_tone":"色调","color_tone_type":"色调枚举","emotion_atmosphere":"氛围","emotion_tags":["情绪枚举"],"search_keywords":["素材检索关键词"],"notable_details":"细节或 null"},'
         '"camera":{"movement":"运镜类型","movement_confidence":0.0,"evidence":"判断依据"},'
         '"quality":{"grade":"精选/可用/备选/废片","issues":["问题"]},'
         '"edit_role":"剪辑用途枚举",'
@@ -368,13 +670,17 @@ def _normalize_segment_analysis(
 ) -> dict[str, Any]:
     visual = dict(_dict_value(raw.get("visual")))
     for key in (
+        "visual_description",
         "shot_type",
         "subject",
         "subject_category",
+        "subject_keywords",
         "action",
         "action_type",
+        "place_context",
         "environment",
         "environment_type",
+        "scene_keywords",
         "lighting",
         "lighting_type",
         "color_tone",
@@ -405,6 +711,7 @@ def _normalize_segment_analysis(
     quality.update(_dict_value(raw.get("quality")))
     quality.setdefault("grade", frame_quality.get("grade") or "不确定")
     quality.setdefault("issues", frame_quality.get("issues") or [])
+    quality = contextualize_quality_for_shot_type(quality, visual.get("shot_type"))
 
     return {
         "segment_type": segment_type,
@@ -422,16 +729,20 @@ def _segment_vl_analysis(segment_analysis: dict[str, Any]) -> dict[str, Any]:
     camera = _dict_value(segment_analysis.get("camera"))
     return {
         "segment_type": segment_analysis.get("segment_type"),
+        "visual_description": visual.get("visual_description"),
         "shot_type": visual.get("shot_type"),
         "camera_movement": camera.get("movement"),
         "movement_confidence": camera.get("movement_confidence"),
         "movement_evidence": camera.get("evidence"),
         "subject": visual.get("subject"),
         "subject_category": visual.get("subject_category"),
+        "subject_keywords": visual.get("subject_keywords") or [],
         "action": visual.get("action"),
         "action_type": visual.get("action_type"),
+        "place_context": visual.get("place_context"),
         "environment": visual.get("environment"),
         "environment_type": visual.get("environment_type"),
+        "scene_keywords": visual.get("scene_keywords") or [],
         "lighting": visual.get("lighting"),
         "lighting_type": visual.get("lighting_type"),
         "color_tone": visual.get("color_tone"),
@@ -448,8 +759,11 @@ def _segment_vl_analysis(segment_analysis: dict[str, Any]) -> dict[str, Any]:
 def _apply_scene_segment_analysis(
     scene: dict[str, Any],
     segment_analysis: dict[str, Any],
+    *,
+    source: str,
 ) -> None:
     scene["segment_type"] = str(segment_analysis.get("segment_type") or "broll")
+    scene["segment_analysis_source"] = source
     scene["speech"] = _dict_value(segment_analysis.get("speech"))
     scene["segment_analysis"] = segment_analysis
     scene["vl_analysis"] = _segment_vl_analysis(segment_analysis)
@@ -467,8 +781,9 @@ def _apply_frame_fallback_segment_analysis(
     *,
     segment_type: str,
     transcript: str,
+    raw_analysis: dict[str, Any] | None = None,
 ) -> None:
-    raw_vl = _dict_value(scene.get("vl_analysis"))
+    raw_vl = _dict_value(raw_analysis) or _dict_value(scene.get("vl_analysis"))
     frame_quality = _dict_value(scene.get("quality_metrics"))
     segment_analysis = _normalize_segment_analysis(
         raw_vl,
@@ -476,7 +791,7 @@ def _apply_frame_fallback_segment_analysis(
         transcript=transcript,
         frame_quality=frame_quality,
     )
-    _apply_scene_segment_analysis(scene, segment_analysis)
+    _apply_scene_segment_analysis(scene, segment_analysis, source="frame_fallback")
 
 
 def _describe_scene_video_segment(
@@ -488,6 +803,7 @@ def _describe_scene_video_segment(
     subtitle_segments: list[dict],
     fps: float,
     video_duration: float,
+    frame_color_transform: dict[str, Any],
 ) -> None:
     overlapping_subtitles = _subtitle_segments_for_scene(
         scene,
@@ -512,11 +828,21 @@ def _describe_scene_video_segment(
         raw_analysis = describe_video_clip(vl_config, clip_path, prompt)
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         scene["segment_analysis_error"] = str(exc)
-        _describe_scene_probe_samples(scene, vl_config)
+        raw_analysis = _describe_scene_probe_samples(
+            scene,
+            vl_config,
+            segment_type=segment_type,
+            transcript=transcript,
+            source_path=source_path,
+            output_dir=output_dir,
+            video_duration=video_duration,
+            frame_color_transform=frame_color_transform,
+        )
         _apply_frame_fallback_segment_analysis(
             scene,
             segment_type=segment_type,
             transcript=transcript,
+            raw_analysis=raw_analysis,
         )
         return
 
@@ -526,7 +852,7 @@ def _describe_scene_video_segment(
         transcript=transcript,
         frame_quality=frame_quality,
     )
-    _apply_scene_segment_analysis(scene, segment_analysis)
+    _apply_scene_segment_analysis(scene, segment_analysis, source="video_vl")
 
 
 def _analysis_summary(
@@ -578,6 +904,7 @@ def _persist_analysis_summary(
         **existing_analysis,
         "overallSummary": overall_summary or merged_overall_summary or "模型分析已完成。",
         "sceneCount": legacy_scene_count(merged_summary),
+        "keywordDictionary": build_keyword_dictionary(merged_summary),
         "editSuggestions": next_edit_suggestions or existing_analysis.get("editSuggestions", []),
         "legacySummary": merged_summary,
     }
@@ -592,16 +919,66 @@ def _complete_analysis(job: JobPublic) -> dict:
     selected_media = [
         item for item in project.media if not media_ids or item.get("id") in media_ids
     ]
+    video_media = [item for item in selected_media if item.get("type") == "video"]
+    progress_items = _initial_analysis_items(video_media)
     subtitle_segments = project.subtitles.get("segments", []) if isinstance(project.subtitles, dict) else []
-    subtitle_segments_by_media: dict[str, list[dict]] = {}
-    for segment in subtitle_segments:
-        if not isinstance(segment, dict):
-            continue
-        media_id = str(segment.get("mediaId") or "")
-        text = str(segment.get("text") or "").strip()
-        if not media_id or not text:
-            continue
-        subtitle_segments_by_media.setdefault(media_id, []).append(segment)
+    subtitle_file_segments = _load_subtitle_segments_from_files(project_folder)
+    if subtitle_file_segments:
+        merged_subtitle_segments = _merge_unique_subtitle_segments(
+            subtitle_segments,
+            subtitle_file_segments,
+        )
+        if len(merged_subtitle_segments) > len(subtitle_segments):
+            data = project.model_dump()
+            existing = data.get("subtitles", {})
+            data["subtitles"] = {
+                "settings": existing.get("settings", {}),
+                "segments": merged_subtitle_segments,
+                "updatedAt": job.updatedAt,
+            }
+            save_project(job.projectFolder, data)
+            subtitle_segments = merged_subtitle_segments
+    subtitle_segments_by_media = _subtitle_segments_by_media(subtitle_segments)
+    missing_subtitle_media = [
+        item
+        for item in video_media
+        if not subtitle_segments_by_media.get(str(item.get("id") or ""))
+    ]
+    if missing_subtitle_media:
+        _update_analysis_job_progress(
+            job,
+            progress=8,
+            stage="transcribing",
+            items=progress_items,
+        )
+        subtitle_settings = project.subtitles.get("settings", {}) if isinstance(project.subtitles, dict) else {}
+        language = str(subtitle_settings.get("language") or "zh")
+        max_words = int(subtitle_settings.get("maxWordsPerSegment") or 24)
+        generated_subtitles, _subtitle_errors = _transcribe_media_subtitles(
+            project_folder=project_folder,
+            project=project,
+            job=job,
+            selected_media=missing_subtitle_media,
+            language=language,
+            max_words=max_words,
+            require_ready=False,
+        )
+        if generated_subtitles:
+            data = project.model_dump()
+            existing = data.get("subtitles", {})
+            data["subtitles"] = {
+                "settings": {
+                    **existing.get("settings", {}),
+                    "model": "Whisper large v3 turbo mlx",
+                    "language": language,
+                    "maxWordsPerSegment": max_words,
+                },
+                "segments": [*existing.get("segments", []), *generated_subtitles],
+                "updatedAt": job.updatedAt,
+            }
+            save_project(job.projectFolder, data)
+            subtitle_segments = [*subtitle_segments, *generated_subtitles]
+            subtitle_segments_by_media = _subtitle_segments_by_media(subtitle_segments)
     selected_media_for_prompt = [
         {
             **item,
@@ -611,17 +988,15 @@ def _complete_analysis(job: JobPublic) -> dict:
         }
         for item in selected_media
     ]
-    video_media = [item for item in selected_media if item.get("type") == "video"]
     vl_config = get_model_runtime_config("vl")
     llm_config = get_model_runtime_config("llm")
     runtime_config = require_runtime_config(vl_config or llm_config, "vl/llm")
     model_suggestions: list[dict] = []
     video_results: list[dict] = []
     model_overall_summary = ""
-    progress_items = _initial_analysis_items(video_media)
     _update_analysis_job_progress(
         job,
-        progress=5,
+        progress=12 if missing_subtitle_media else 5,
         stage="queued",
         items=progress_items,
     )
@@ -644,6 +1019,7 @@ def _complete_analysis(job: JobPublic) -> dict:
                 current_item=item,
                 items=progress_items,
             )
+            video_started_at = time.perf_counter()
             source_path = _media_source_path(project_folder, item)
             video_result = extract_video_keyframes(
                 source_path,
@@ -686,6 +1062,7 @@ def _complete_analysis(job: JobPublic) -> dict:
                         subtitle_segments=media_subtitles,
                         fps=fps,
                         video_duration=video_duration,
+                        frame_color_transform=_dict_value(video_result.get("frame_color_transform")),
                     )
             _set_analysis_item_state(
                 progress_items,
@@ -702,6 +1079,10 @@ def _complete_analysis(job: JobPublic) -> dict:
                 items=progress_items,
             )
             video_result["overall_summary"] = _summarize_video_from_scenes(video_result)
+            _finalize_video_analysis_metadata(
+                video_result,
+                time.perf_counter() - video_started_at,
+            )
             video_results.append(video_result)
             _set_analysis_item_state(
                 progress_items,
@@ -1059,26 +1440,29 @@ def _split_subtitle_text(text: str, max_units: int) -> list[str]:
     ]
 
 
-def _complete_subtitles(job: JobPublic) -> dict:
-    project = open_project(job.projectFolder)
-    project_folder = Path(project.folderPath)
-    ensure_project_subdirs(project_folder)
+def _transcribe_media_subtitles(
+    *,
+    project_folder: Path,
+    project,
+    job: JobPublic,
+    selected_media: list[dict],
+    language: str,
+    max_words: int,
+    require_ready: bool,
+) -> tuple[list[dict], list[dict]]:
+    try:
+        whisper_service.ensure_ready()
+    except RuntimeError as exc:
+        if require_ready:
+            raise
+        return [], [{"error": str(exc)}]
+
     fps = float(project.timeline.get("fps", 30) or 30)
-    media_ids = job.payload.get("mediaIds", [])
-    selected_media = [
-        item
-        for item in project.media
-        if (not media_ids or item.get("id") in media_ids)
-        and item.get("type") in {"video", "audio"}
-    ]
-    language = str(job.payload.get("language") or "zh")
-    max_words = int(job.payload.get("maxWordsPerSegment") or 24)
     job_cache_dir = subtitle_job_cache_dir(project_folder, job.id)
     all_segments: list[dict] = []
     errors: list[dict] = []
 
     try:
-        whisper_service.ensure_ready()
         for item in selected_media:
             media_id = str(item.get("id") or "")
             source_path = _media_source_path(project_folder, item)
@@ -1121,6 +1505,32 @@ def _complete_subtitles(job: JobPublic) -> dict:
                     )
     finally:
         clear_subtitle_job_cache(project_folder, job.id)
+
+    return all_segments, errors
+
+
+def _complete_subtitles(job: JobPublic) -> dict:
+    project = open_project(job.projectFolder)
+    project_folder = Path(project.folderPath)
+    ensure_project_subdirs(project_folder)
+    media_ids = job.payload.get("mediaIds", [])
+    selected_media = [
+        item
+        for item in project.media
+        if (not media_ids or item.get("id") in media_ids)
+        and item.get("type") in {"video", "audio"}
+    ]
+    language = str(job.payload.get("language") or "zh")
+    max_words = int(job.payload.get("maxWordsPerSegment") or 24)
+    all_segments, errors = _transcribe_media_subtitles(
+        project_folder=project_folder,
+        project=project,
+        job=job,
+        selected_media=selected_media,
+        language=language,
+        max_words=max_words,
+        require_ready=True,
+    )
 
     data = project.model_dump()
     existing = data.get("subtitles", {})

@@ -78,6 +78,7 @@ function project(): ProjectRecord {
       keyframes: [],
       transcriptSegments: [],
       editSuggestions: [],
+      keywordDictionary: [],
       legacySummary: null,
     },
     sceneGroups: { settings: { gapMinutes: 10 }, groups: [] },

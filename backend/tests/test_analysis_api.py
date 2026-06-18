@@ -34,6 +34,7 @@ def test_analysis_endpoint_returns_default_project_analysis(monkeypatch, tmp_pat
         "keyframes": [],
         "transcriptSegments": [],
         "editSuggestions": [],
+        "keywordDictionary": [],
         "legacySummary": None,
     }
 

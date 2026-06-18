@@ -8,12 +8,17 @@ def test_vision_prompt_includes_taxonomy_constraints():
     prompt = build_vision_prompt()
 
     assert "所有枚举字段必须只从下面字典值中选择" in prompt
+    assert '"visual_description"' in prompt
+    assert "200 字" in prompt
     assert "shot_type: 远景, 全景, 中远景, 中景" in prompt
     assert "edit_role: 开场建立, 过渡, B-roll" in prompt
     assert '"subject_category"' in prompt
+    assert '"subject_keywords"' in prompt
+    assert '"place_context"' in prompt
+    assert '"scene_keywords"' in prompt
     assert '"search_keywords"' in prompt
     assert "emotion_tags 最多 3 个" in prompt
-    assert "search_keywords 3-8 个中文关键词" in prompt
+    assert "search_keywords 8-16 个素材检索关键词" in prompt
 
 
 def test_script_edit_prompt_restricts_model_to_candidate_ids():
@@ -58,3 +63,53 @@ def test_describe_video_clip_sends_data_video_payload(monkeypatch, tmp_path: Pat
     assert content[0] == {"type": "text", "text": "请判断运镜"}
     assert content[1]["type"] == "video_url"
     assert content[1]["video_url"]["url"].startswith("data:video/mp4;base64,")
+
+
+def test_describe_frame_sequence_sends_ordered_image_payloads(monkeypatch, tmp_path: Path):
+    from app.services import openai_compatible
+
+    first = tmp_path / "frame_001.jpg"
+    second = tmp_path / "frame_002.jpg"
+    first.write_bytes(b"first")
+    second.write_bytes(b"second")
+    config = ModelRuntimeConfig(
+        capability="vl",
+        base_url="http://127.0.0.1:8000/v1",
+        model="local-vl",
+        api_key="",
+        enabled=True,
+    )
+    captured = {}
+
+    def fake_chat_completion(runtime_config, messages, timeout=60):
+        captured["config"] = runtime_config
+        captured["messages"] = messages
+        captured["timeout"] = timeout
+        return '{"camera":{"movement":"推镜头"}}'
+
+    monkeypatch.setattr(openai_compatible, "chat_completion", fake_chat_completion)
+
+    result = openai_compatible.describe_frame_sequence(
+        config,
+        [
+            {"label": "sample_01", "time": 0.1, "frame": str(first)},
+            {"label": "sample_02", "time": 0.9, "frame": str(second)},
+        ],
+        "请按 ordered_frames 判断运镜",
+    )
+
+    assert result == {"camera": {"movement": "推镜头"}}
+    assert captured["config"] == config
+    assert captured["timeout"] == 180
+    content = captured["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "请按 ordered_frames 判断运镜"}
+    assert content[1] == {
+        "type": "text",
+        "text": "ordered_frame 1: label=sample_01, time=0.1s",
+    }
+    assert content[2]["type"] == "image_url"
+    assert content[3] == {
+        "type": "text",
+        "text": "ordered_frame 2: label=sample_02, time=0.9s",
+    }
+    assert content[4]["type"] == "image_url"

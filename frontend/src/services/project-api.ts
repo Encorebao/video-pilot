@@ -62,6 +62,7 @@ const defaultAnalysis: AnalysisResults = {
   keyframes: [],
   transcriptSegments: [],
   editSuggestions: [],
+  keywordDictionary: [],
   legacySummary: null,
 };
 
@@ -109,6 +110,7 @@ export function toProjectRecord(project: BackendProjectManifest): ProjectRecord 
       keyframes: project.analysis?.keyframes ?? defaultAnalysis.keyframes,
       transcriptSegments: project.analysis?.transcriptSegments ?? defaultAnalysis.transcriptSegments,
       editSuggestions: project.analysis?.editSuggestions ?? defaultAnalysis.editSuggestions,
+      keywordDictionary: project.analysis?.keywordDictionary ?? defaultAnalysis.keywordDictionary,
       legacySummary: project.analysis?.legacySummary ?? defaultAnalysis.legacySummary,
     },
     sceneGroups: {

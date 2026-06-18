@@ -24,6 +24,7 @@ import { SceneGroupsPanel } from "@/features/scene-groups/components/scene-group
 import { ClipAnalysisPanel } from "@/features/analysis/components/clip-analysis-panel";
 import { SubtitlePanel } from "@/features/subtitles/components/subtitle-panel";
 import { ScriptEditPanel } from "@/features/script-edit/components/script-edit-panel";
+import { pendingBatchAnalysisMediaIds } from "@/features/media/lib/analysis-index";
 
 import { useProjectStore } from "@/stores/project-store";
 import { useUIStore, type WorkspacePanel } from "@/stores/ui-store";
@@ -192,7 +193,9 @@ export function EditorShell() {
 
   function analyzeAll() {
     if (!project) return;
-    void startAnalysisJob(project.mediaItems.map((item) => item.id));
+    const mediaIds = pendingBatchAnalysisMediaIds(project);
+    if (mediaIds.length === 0) return;
+    void startAnalysisJob(mediaIds);
   }
 
   function exportFcpxml() {
@@ -210,6 +213,13 @@ export function EditorShell() {
         (track) => track.clips.length > 0,
       )
     : false;
+  const pendingAnalysisMediaIds = project ? pendingBatchAnalysisMediaIds(project) : [];
+  const isAnalyzingMedia = analyzingIds.size > 0;
+  const analysisButtonTitle = isAnalyzingMedia
+    ? "AI 分析任务进行中"
+    : pendingAnalysisMediaIds.length > 0
+      ? `AI 分析未分析素材（${pendingAnalysisMediaIds.length} 个）`
+      : "全部视频素材已完成 AI 分析";
 
   if (!project) {
     const isRestoring = isLoadingProject || !restoreAttempted;
@@ -352,22 +362,22 @@ export function EditorShell() {
               activePanel === "media" ? (
                 <button
                   type="button"
-                  title="AI 分析全部素材"
-                  disabled={project.mediaItems.length === 0}
+                  title={analysisButtonTitle}
+                  disabled={isAnalyzingMedia || pendingAnalysisMediaIds.length === 0}
                   onClick={analyzeAll}
                   className={`flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] transition-colors disabled:pointer-events-none disabled:opacity-30 ${
-                    analyzingIds.size > 0
+                    isAnalyzingMedia
                       ? "text-violet-400/60"
                       : "text-white/20 hover:bg-white/[0.07] hover:text-white/50"
                   }`}
                 >
-                  {analyzingIds.size > 0 ? (
+                  {isAnalyzingMedia ? (
                     <Loader2 className="size-2.5 animate-spin" />
                   ) : (
                     <Sparkles className="size-2.5" />
                   )}
                   <span className="text-[10px]">
-                    {analyzingIds.size > 0 ? "分析中" : "AI 分析"}
+                    {isAnalyzingMedia ? "分析中" : "AI 分析"}
                   </span>
                 </button>
               ) : undefined

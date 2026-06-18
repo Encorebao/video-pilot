@@ -11,4 +11,5 @@ class AnalysisResults(BaseModel):
     keyframes: list[dict] = Field(default_factory=list)
     transcriptSegments: list[dict] = Field(default_factory=list)
     editSuggestions: list[dict] = Field(default_factory=list)
+    keywordDictionary: list[str] = Field(default_factory=list)
     legacySummary: Optional[Dict[str, Any]] = None

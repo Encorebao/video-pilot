@@ -76,17 +76,25 @@ def build_vision_prompt() -> str:
         "保留自然语言描述，同时为素材检索输出稳定枚举标签。\n"
         "所有枚举字段必须只从下面字典值中选择；如果无法判断，选择“不确定”。\n"
         f"{taxonomy_lines}\n"
-        "emotion_tags 最多 3 个；search_keywords 3-8 个中文关键词。\n"
+        "先输出 visual_description，用约 200 字描述当前画面内容、主体、场景、光线和可用性。\n"
+        "subject_keywords 输出 2-6 个画面主体/内容关键词；"
+        "place_context 输出视觉判断出的具体地点/场所/空间类型，例如咖啡店、办公室、街边、家中厨房，无法判断写“不确定”；"
+        "scene_keywords 输出 2-6 个场景环境关键词；"
+        "emotion_tags 最多 3 个；search_keywords 8-16 个素材检索关键词，允许自由生成，不要受枚举字典限制。\n"
         "包含以下字段（用中文回答）："
         "{"
+        '"visual_description":"约 200 字画面描述",'
         '"shot_type":"景别",'
         '"camera_movement":"摄像机运动",'
         '"subject":"画面主体",'
         '"subject_category":"主体类型枚举",'
+        '"subject_keywords":["主体关键词"],'
         '"action":"主体动作",'
         '"action_type":"动作枚举",'
+        '"place_context":"视觉判断出的具体地点/场所/空间类型",'
         '"environment":"场景环境",'
         '"environment_type":"环境枚举",'
+        '"scene_keywords":["场景关键词"],'
         '"lighting":"光线特征",'
         '"lighting_type":"光线枚举",'
         '"color_tone":"色调风格",'
@@ -94,7 +102,7 @@ def build_vision_prompt() -> str:
         '"emotion_atmosphere":"情绪与氛围",'
         '"emotion_tags":["情绪枚举"],'
         '"edit_role":"剪辑用途枚举",'
-        '"search_keywords":["关键词"],'
+        '"search_keywords":["素材检索关键词"],'
         '"edit_suggestion":"剪辑建议",'
         '"notable_details":"值得注意的细节或 null"'
         "}。只输出 JSON，不要其他文字。"
@@ -105,23 +113,53 @@ def _vision_prompt() -> str:
     return build_vision_prompt()
 
 
-def describe_frame(config: ModelRuntimeConfig, image_path: Path) -> dict[str, Any]:
+def _build_image_url_content(image_path: Path) -> dict[str, Any]:
     image_b64 = base64.b64encode(image_path.read_bytes()).decode("utf-8")
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+    }
+
+
+def describe_frame(config: ModelRuntimeConfig, image_path: Path) -> dict[str, Any]:
     content = chat_completion(
         config,
         [
             {
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
-                    },
+                    _build_image_url_content(image_path),
                     {"type": "text", "text": _vision_prompt()},
                 ],
             }
         ],
         timeout=120,
+    )
+    return _extract_json_object(content)
+
+
+def describe_frame_sequence(
+    config: ModelRuntimeConfig,
+    frames: list[dict[str, Any]],
+    prompt: str,
+) -> dict[str, Any]:
+    content_parts: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+    for index, frame in enumerate(frames, start=1):
+        frame_path = Path(str(frame.get("frame") or ""))
+        label = str(frame.get("label") or f"sample_{index:02d}")
+        time_sec = frame.get("time")
+        content_parts.append(
+            {
+                "type": "text",
+                "text": f"ordered_frame {index}: label={label}, time={time_sec}s",
+            }
+        )
+        content_parts.append(_build_image_url_content(frame_path))
+
+    content = chat_completion(
+        config,
+        [{"role": "user", "content": content_parts}],
+        timeout=180,
     )
     return _extract_json_object(content)
 

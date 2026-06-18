@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 
 import { clearProjectCache } from "@/services/project-api";
+import { runVlFrameSamplingDebug, type VlFrameSamplingDebugResult } from "@/services/vl-debug-api";
 import { useProjectStore } from "@/stores/project-store";
 import { useSettingsStore } from "@/stores/settings-store";
 import type { DependencyItem, ModelConfig } from "@/types/settings";
@@ -43,6 +44,7 @@ type SectionId =
   | "audio-spec"
   | "export-defaults"
   | "ai-models"
+  | "vl-debug"
   | "whisper-local"
   | "ai-deps";
 
@@ -80,6 +82,7 @@ const NAV_GROUPS: NavGroup[] = [
     title: "AI 模型",
     items: [
       { id: "ai-models", label: "模型接入", icon: <Brain className="size-3.5" /> },
+      { id: "vl-debug", label: "VL 抽帧调试", icon: <Video className="size-3.5" /> },
       { id: "whisper-local", label: "Whisper 本地模型", icon: <Captions className="size-3.5" /> },
       { id: "ai-deps", label: "依赖检查", icon: <PackageCheck className="size-3.5" /> },
     ],
@@ -877,6 +880,303 @@ function AiModelsSection() {
   );
 }
 
+const DEFAULT_VL_DEBUG_SCHEMA = `{
+  "segment_type": "broll | aroll",
+  "visual": {
+    "visual_description": "按抽帧顺序综合后的画面描述",
+    "shot_type": "景别",
+    "subject": "主体",
+    "action": "动作",
+    "environment": "环境"
+  },
+  "camera": {
+    "movement": "固定镜头 | 推镜头 | 拉镜头 | 摇镜头 | 移镜头 | 跟镜头 | 手持晃动 | 不确定",
+    "movement_confidence": 0.0,
+    "evidence": "根据抽帧顺序中主体、背景、构图边缘的连续变化说明依据"
+  },
+  "quality": {
+    "grade": "精选 | 可用 | 慎用",
+    "issues": []
+  },
+  "edit_role": "剪辑用途",
+  "edit_suggestion": "剪辑建议"
+}`;
+
+const DEFAULT_VL_DEBUG_EXTRA_INSTRUCTIONS =
+  "你正在调试抽帧视觉识别链路。请按抽帧顺序判断可见运动变化，不要把每一帧割裂成独立图片。\n必须只输出一个 JSON object，不要 Markdown，不要解释，不要代码块。";
+
+function formatJsonForDisplay(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return JSON.stringify(value, null, 2);
+}
+
+function VlDebugSection() {
+  const project = useProjectStore((s) => s.currentProject);
+  const [projectFolder, setProjectFolder] = useState(project?.location ?? "");
+  const [videoSource, setVideoSource] = useState("");
+  const [prompt, setPrompt] = useState(
+    "请分析当前抽取帧的画面内容、主体动作、画面质量和剪辑用途。只输出 JSON。",
+  );
+  const [extraInstructions, setExtraInstructions] = useState(DEFAULT_VL_DEBUG_EXTRA_INSTRUCTIONS);
+  const [outputSchema, setOutputSchema] = useState(DEFAULT_VL_DEBUG_SCHEMA);
+  const [temperature, setTemperature] = useState("0.2");
+  const [maxTokens, setMaxTokens] = useState("1200");
+  const [intervalSeconds, setIntervalSeconds] = useState("0.5");
+  const [maxFrames, setMaxFrames] = useState("120");
+  const [persist, setPersist] = useState(true);
+  const [result, setResult] = useState<VlFrameSamplingDebugResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isRunning, setIsRunning] = useState(false);
+
+  async function runDebug() {
+    setError(null);
+    setResult(null);
+    let parsedSchema: Record<string, unknown>;
+    try {
+      parsedSchema = outputSchema.trim()
+        ? (JSON.parse(outputSchema) as Record<string, unknown>)
+        : {};
+    } catch (schemaError) {
+      setError(schemaError instanceof Error ? `输出参数 JSON 无效：${schemaError.message}` : "输出参数 JSON 无效");
+      return;
+    }
+    setIsRunning(true);
+    try {
+      const nextResult = await runVlFrameSamplingDebug({
+        projectFolder: projectFolder.trim() || project?.location || "",
+        videoPath: videoSource,
+        prompt,
+        extraInstructions,
+        outputSchema: parsedSchema,
+        intervalSeconds: Number(intervalSeconds),
+        maxFrames: Number(maxFrames),
+        temperature: Number(temperature),
+        maxTokens: Number(maxTokens),
+        persist,
+      });
+      setResult(nextResult);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "VL 抽帧调试失败");
+    } finally {
+      setIsRunning(false);
+    }
+  }
+
+  const canRun =
+    (projectFolder.trim().length > 0 || Boolean(project?.location)) &&
+    videoSource.trim().length > 0 &&
+    prompt.trim().length > 0 &&
+    !isRunning;
+  const canPickVideoFile = typeof window !== "undefined" && Boolean(window.electronAPI?.selectMediaFiles);
+
+  async function chooseDebugVideoFile() {
+    const selectedPaths = await window.electronAPI?.selectMediaFiles?.();
+    if (!selectedPaths || selectedPaths.length === 0) return;
+    setVideoSource(selectedPaths[0]);
+  }
+
+  return (
+    <div>
+      <div className="mb-6 flex items-end justify-between">
+        <h2 className="text-base font-semibold text-white/85">VL 抽帧调试</h2>
+        {result ? (
+          <Badge className={result.ok ? MODEL_STATUS_STYLE.ready : MODEL_STATUS_STYLE.error}>
+            {result.ok ? "逐帧完成" : "存在帧错误"}
+          </Badge>
+        ) : null}
+      </div>
+
+      <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
+        <div className="grid gap-3">
+          <div>
+            <label className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">项目目录</label>
+            <input
+              type="text"
+              value={projectFolder}
+              onChange={(event) => setProjectFolder(event.target.value)}
+              placeholder={project?.location ?? "/Users/you/Projects/video-project"}
+              className="w-full rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 font-mono text-[12px] text-white/70 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">视频文件</label>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={videoSource}
+                readOnly
+                placeholder="/path/to/clip.mp4"
+                className="min-w-0 flex-1 cursor-default rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 font-mono text-[12px] text-white/70 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
+              />
+              <button
+                type="button"
+                disabled={!canPickVideoFile}
+                onClick={() => void chooseDebugVideoFile()}
+                className="shrink-0 rounded-[7px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[11px] text-white/55 transition-colors hover:bg-white/[0.1] hover:text-white/80 disabled:pointer-events-none disabled:opacity-35"
+              >
+                选择文件
+              </button>
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">Prompt</label>
+            <textarea
+              value={prompt}
+              onChange={(event) => setPrompt(event.target.value)}
+              rows={4}
+              className="w-full resize-y rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-2 text-[12px] leading-5 text-white/70 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">附加约束</label>
+            <textarea
+              value={extraInstructions}
+              onChange={(event) => setExtraInstructions(event.target.value)}
+              rows={3}
+              className="w-full resize-y rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-2 text-[12px] leading-5 text-white/65 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">VL 输出参数 JSON</label>
+            <textarea
+              value={outputSchema}
+              onChange={(event) => setOutputSchema(event.target.value)}
+              rows={12}
+              className="w-full resize-y rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-2 font-mono text-[11px] leading-4 text-white/65 placeholder:text-white/20 focus:border-white/[0.22] focus:outline-none"
+            />
+          </div>
+
+          <div className="grid gap-2 sm:grid-cols-[1fr_1fr_1fr_1fr_auto]">
+            <label className="block">
+              <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">采样间隔秒</span>
+              <input
+                type="number"
+                min="0.1"
+                max="10"
+                step="0.1"
+                value={intervalSeconds}
+                onChange={(event) => setIntervalSeconds(event.target.value)}
+                className="w-full rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 text-[12px] text-white/70 focus:border-white/[0.22] focus:outline-none"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">最大帧数</span>
+              <input
+                type="number"
+                min="1"
+                max="600"
+                step="1"
+                value={maxFrames}
+                onChange={(event) => setMaxFrames(event.target.value)}
+                className="w-full rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 text-[12px] text-white/70 focus:border-white/[0.22] focus:outline-none"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">Temperature</span>
+              <input
+                type="number"
+                min="0"
+                max="2"
+                step="0.1"
+                value={temperature}
+                onChange={(event) => setTemperature(event.target.value)}
+                className="w-full rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 text-[12px] text-white/70 focus:border-white/[0.22] focus:outline-none"
+              />
+            </label>
+            <label className="block">
+              <span className="mb-1 block text-[10px] uppercase tracking-wider text-white/25">Max Tokens</span>
+              <input
+                type="number"
+                min="1"
+                max="8192"
+                step="1"
+                value={maxTokens}
+                onChange={(event) => setMaxTokens(event.target.value)}
+                className="w-full rounded-[7px] border border-white/[0.1] bg-white/[0.04] px-2.5 py-1.5 text-[12px] text-white/70 focus:border-white/[0.22] focus:outline-none"
+              />
+            </label>
+            <label className="flex items-end gap-2 rounded-[7px] border border-white/[0.07] bg-white/[0.025] px-3 py-2 text-[11px] text-white/45">
+              <input
+                type="checkbox"
+                checked={persist}
+                onChange={(event) => setPersist(event.target.checked)}
+                className="size-3.5 accent-violet-500"
+              />
+              落盘
+            </label>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={!canRun}
+              onClick={() => void runDebug()}
+              className="flex items-center gap-1.5 rounded-[7px] border border-white/[0.1] bg-white/[0.06] px-3 py-1.5 text-[11px] text-white/60 transition-colors hover:bg-white/[0.1] hover:text-white/80 disabled:pointer-events-none disabled:opacity-35"
+            >
+              <Play className="size-3" />
+              {isRunning ? "识别中..." : "运行抽帧识别"}
+            </button>
+            {result?.debugPath ? (
+              <span className="min-w-0 truncate font-mono text-[10px] text-white/25">{result.debugPath}</span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {error ? (
+        <div className="mt-3 rounded-[8px] border border-red-300/15 bg-red-300/[0.06] px-3 py-2 text-[11px] leading-4 text-red-100/60">
+          {error}
+        </div>
+      ) : null}
+
+      {result ? (
+        <div className="mt-3 grid gap-3">
+          <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <p className="text-[12px] font-medium text-white/60">逐帧结果</p>
+              <span className="text-[10px] text-white/25">{result.frames.length} 帧</span>
+            </div>
+            <div className="max-h-96 overflow-auto rounded-[7px] border border-white/[0.06] bg-black/20">
+              {result.frames.map((frame) => (
+                <div key={frame.index} className="border-b border-white/[0.06] p-3 last:border-none">
+                  <div className="mb-2 flex flex-wrap items-center gap-2 text-[10px] text-white/30">
+                    <span>#{frame.index}</span>
+                    <span>{frame.time.toFixed(2)}s</span>
+                    {frame.parseError ? <span className="text-red-200/50">{frame.parseError}</span> : null}
+                  </div>
+                  <pre className="whitespace-pre-wrap font-mono text-[11px] leading-4 text-white/50">
+                    {formatJsonForDisplay(frame.parsed) || frame.rawContent || "-"}
+                  </pre>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
+            <p className="mb-2 text-[12px] font-medium text-white/60">Raw Content</p>
+            <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-[7px] border border-white/[0.06] bg-black/20 p-3 font-mono text-[11px] leading-4 text-white/45">
+              {result.frames
+                .map((frame) => `#${frame.index} ${frame.time.toFixed(2)}s\n${frame.rawContent}`)
+                .join("\n\n")}
+            </pre>
+          </div>
+
+          <div className="rounded-[10px] border border-white/[0.07] bg-white/[0.025] p-4">
+            <p className="mb-2 text-[12px] font-medium text-white/60">Request</p>
+            <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-[7px] border border-white/[0.06] bg-black/20 p-3 font-mono text-[11px] leading-4 text-white/40">
+              {formatJsonForDisplay(result.request)}
+            </pre>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function WhisperLocalSection() {
   const whisperStatus = useSettingsStore((s) => s.whisperStatus);
   const isLoadingWhisper = useSettingsStore((s) => s.isLoadingWhisper);
@@ -1140,6 +1440,7 @@ const SECTION_COMPONENTS: Record<SectionId, React.ReactNode> = {
   "audio-spec": <AudioSpecSection />,
   "export-defaults": <ExportDefaultsSection />,
   "ai-models": <AiModelsSection />,
+  "vl-debug": <VlDebugSection />,
   "whisper-local": <WhisperLocalSection />,
   "ai-deps": <AiDepsSection />,
 };

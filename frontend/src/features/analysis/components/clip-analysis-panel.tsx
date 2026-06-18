@@ -8,9 +8,7 @@ import {
   Clapperboard,
   Film,
   Gauge,
-  Info,
   Layers3,
-  Search,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -29,7 +27,6 @@ import { getProjectFrameUrl } from "@/services/media-api";
 import { useProjectStore } from "@/stores/project-store";
 import { useTimelineStore } from "@/stores/timeline-store";
 import { useUIStore } from "@/stores/ui-store";
-import { getAnalysisJobResult } from "@/types/jobs";
 import type {
   EditSuggestion,
   LegacyAnalysisSummary,
@@ -71,6 +68,12 @@ function formatValue(value: unknown): string {
       .join(" / ");
   }
   return String(value);
+}
+
+function segmentAnalysisSourceLabel(value: unknown): string {
+  if (value === "video_vl") return "VL 视频判断";
+  if (value === "frame_fallback") return "抽帧回退判断";
+  return typeof value === "string" && value.trim() ? value : "-";
 }
 
 function filenameFromPath(path?: string): string {
@@ -239,6 +242,108 @@ function SegmentTypePill({
   );
 }
 
+function stringItems(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return value
+      .split(/[、,，\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function CompactFact({ label, value }: { label: string; value: unknown }) {
+  if (value == null || value === "" || (Array.isArray(value) && value.length === 0)) return null;
+  return (
+    <div className="min-w-0 rounded-[7px] border border-white/[0.06] bg-white/[0.025] px-2 py-1.5">
+      <div className="text-[10px] leading-3 text-white/24">{label}</div>
+      <div className="mt-1 truncate text-[12px] leading-4 text-white/58">{formatValue(value)}</div>
+    </div>
+  );
+}
+
+function KeywordChips({ label, value }: { label: string; value: unknown }) {
+  const keywords = stringItems(value).slice(0, 8);
+  if (keywords.length === 0) return null;
+
+  return (
+    <div>
+      <div className="mb-1 text-[10px] leading-3 text-white/24">{label}</div>
+      <div className="flex flex-wrap gap-1">
+        {keywords.map((keyword, index) => (
+          <span
+            key={`${label}-${keyword}-${index}`}
+            className="rounded-full border border-emerald-300/12 bg-emerald-300/[0.055] px-2 py-0.5 text-[10px] leading-4 text-emerald-100/52"
+          >
+            #{keyword}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ContentRecognitionSummary({
+  display,
+  fallbackSummary,
+}: {
+  display: ReturnType<typeof sceneAnalysisDisplay> | null;
+  fallbackSummary?: string;
+}) {
+  const visualRows = display?.visualRows ?? [];
+  const cameraRows = display?.cameraRows ?? [];
+  const description = valueByKey(visualRows, "visual_description") ?? fallbackSummary;
+  const editSuggestion = valueByKey(visualRows, "edit_suggestion");
+
+  return (
+    <div className="space-y-3">
+      <p className="text-[12px] leading-5 text-white/42">
+        {formatValue(description ?? valueByKey(visualRows, "subject") ?? "当前素材还没有可用的镜头描述。")}
+      </p>
+
+      {display ? (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <SegmentTypePill label={display.segmentType} tone={display.segmentTypeTone} />
+          {stringItems(valueByKey(visualRows, "emotion_tags")).map((tag, index) => (
+            <span
+              key={`${tag}-${index}`}
+              className="rounded-full border border-violet-300/12 bg-violet-300/[0.055] px-2 py-0.5 text-[10px] leading-4 text-violet-100/55"
+            >
+              {tag}
+            </span>
+          ))}
+        </div>
+      ) : null}
+
+      <div className="grid grid-cols-2 gap-1.5">
+        <CompactFact label="主体" value={valueByKey(visualRows, "subject")} />
+        <CompactFact label="地点" value={valueByKey(visualRows, "place_context")} />
+        <CompactFact label="环境" value={valueByKey(visualRows, "environment") ?? valueByKey(visualRows, "environment_type")} />
+        <CompactFact label="景别" value={valueByKey(visualRows, "shot_type")} />
+        <CompactFact label="镜头" value={valueByKey(cameraRows, "movement")} />
+        <CompactFact label="光线" value={valueByKey(visualRows, "lighting") ?? valueByKey(visualRows, "lighting_type")} />
+        <CompactFact label="色调" value={valueByKey(visualRows, "color_tone") ?? valueByKey(visualRows, "color_tone_type")} />
+      </div>
+
+      <div className="space-y-2">
+        <KeywordChips label="主体关键词" value={valueByKey(visualRows, "subject_keywords")} />
+        <KeywordChips label="场景关键词" value={valueByKey(visualRows, "scene_keywords")} />
+        <KeywordChips label="素材关键词" value={valueByKey(visualRows, "search_keywords")} />
+      </div>
+
+      {editSuggestion ? (
+        <div className="rounded-[7px] border border-white/[0.06] bg-white/[0.025] px-2 py-1.5">
+          <div className="text-[10px] leading-3 text-white/24">剪辑建议</div>
+          <div className="mt-1 text-[12px] leading-5 text-white/45">{formatValue(editSuggestion)}</div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function SceneSegmentAnalysis({ scene }: { scene: LegacyVisualAnalysisScene | null | undefined }) {
   if (!scene) {
     return <p className="px-3 py-1 text-[12px] leading-5 text-white/28">暂无片段分析</p>;
@@ -251,6 +356,7 @@ function SceneSegmentAnalysis({ scene }: { scene: LegacyVisualAnalysisScene | nu
         <SegmentTypePill label={display.segmentType} tone={display.segmentTypeTone} />
       </div>
       <MiniLabel>口播</MiniLabel>
+      <DetailRow label="判断来源" value={segmentAnalysisSourceLabel(scene.segment_analysis_source)} />
       <DetailRows rows={display.speechRows} />
       <MiniLabel>运镜</MiniLabel>
       <DetailRows rows={display.cameraRows} />
@@ -266,8 +372,8 @@ function SceneSegmentAnalysis({ scene }: { scene: LegacyVisualAnalysisScene | nu
       ) : null}
       {scene.segment_analysis_error ? (
         <>
-          <MiniLabel>回退信息</MiniLabel>
-          <DetailRow label="片段分析错误" value={scene.segment_analysis_error} />
+          <MiniLabel>回退原因</MiniLabel>
+          <DetailRow label="视频判断错误" value={scene.segment_analysis_error} />
         </>
       ) : null}
     </div>
@@ -425,100 +531,12 @@ function SceneDetailCard({
   );
 }
 
-function ProjectAnalysisOverview({
-  project,
-  legacySummary,
-  analysisStatus,
-  analysisError,
-  totalLegacyScenes,
-  isAnalyzed,
-}: {
-  project: ProjectRecord;
-  legacySummary: LegacyAnalysisSummary | null;
-  analysisStatus: string;
-  analysisError: string | null;
-  totalLegacyScenes: number;
-  isAnalyzed: boolean;
-}) {
-  const videos = legacySummary?.videos ?? [];
-
-  return (
-    <div className="flex h-full flex-col text-sm">
-      <div className="min-h-0 flex-1 overflow-y-auto pb-3">
-        <SectionLabel>项目分析</SectionLabel>
-        <div className="px-3 pb-2 text-[11px] leading-4 text-white/25">{analysisStatus}</div>
-        {analysisError ? (
-          <div className="mx-3 mb-2 rounded-[7px] border border-amber-300/15 bg-amber-300/[0.06] px-2 py-1.5 text-[11px] leading-4 text-amber-100/55">
-            {analysisError}
-          </div>
-        ) : null}
-        <InfoCard icon={<Info className="size-3.5 text-sky-300/55" />} title="汇总">
-          <DetailRow label="视频数量" value={legacySummary?.total_videos ?? project.mediaItems.length} />
-          <DetailRow label="图像模型" value={legacySummary?.image_model} />
-          <DetailRow label="镜头数量" value={totalLegacyScenes || project.analysis.sceneCount} />
-          <DetailRow label="分析状态" value={isAnalyzed ? "已分析" : "待分析"} />
-          <p className="mt-2 text-[12px] leading-5 text-white/35">
-            {project.analysis.overallSummary || "暂无整体摘要。请选择左侧素材并点击 AI 分析。"}
-          </p>
-        </InfoCard>
-
-        <Divider />
-
-        <SectionLabel>视频</SectionLabel>
-        {videos.length === 0 ? (
-          <InfoCard icon={<Search className="size-3.5 text-white/35" />} title="暂无分析结果">
-            <p className="text-[12px] leading-5 text-white/30">
-              左侧素材库的 AI 分析是当前唯一分析入口。分析完成后会在这里显示镜头和画面内容。
-            </p>
-          </InfoCard>
-        ) : (
-          videos.map((video, videoIndex) => {
-            const scenes = video.visual_analysis?.scenes ?? [];
-            return (
-              <InfoCard
-                key={`${video.video ?? video.video_path ?? videoIndex}-${videoIndex}`}
-                icon={<Film className="size-3.5 text-violet-300/55" />}
-                title={video.video ?? `视频 ${videoIndex + 1}`}
-              >
-                <DetailRow label="文件名" value={video.video} />
-                <DetailRow label="原始路径" value={video.video_path} />
-                <DetailRow label="输出目录" value={video.output_dir} />
-                <DetailRow label="镜头数" value={video.visual_analysis?.total_scenes ?? scenes.length} />
-                <FieldList fields={video.video_meta} />
-                <p className="mt-2 px-3 text-[12px] leading-5 text-white/35">
-                  {video.overall_summary || "暂无视频摘要"}
-                </p>
-                <div className="mt-2 space-y-2 px-3">
-                  {scenes.length === 0 ? (
-                    <p className="py-1 text-[12px] leading-5 text-white/28">暂无镜头数据</p>
-                  ) : (
-                    scenes.map((scene, sceneIndex) => (
-                      <SceneDetailCard
-                        key={`${scene.index ?? sceneIndex}-${scene.start ?? 0}`}
-                        scene={scene}
-                        sceneIndex={sceneIndex}
-                        projectFolder={project.location}
-                      />
-                    ))
-                  )}
-                </div>
-              </InfoCard>
-            );
-          })
-        )}
-      </div>
-    </div>
-  );
-}
-
 export function ClipAnalysisPanel() {
   const project = useProjectStore((s) => s.currentProject);
   const isLoadingAnalysis = useProjectStore((s) => s.isLoadingAnalysis);
   const analysisError = useProjectStore((s) => s.analysisError);
   const analysisSyncedAt = useProjectStore((s) => s.analysisSyncedAt);
   const refreshProjectAnalysis = useProjectStore((s) => s.refreshProjectAnalysis);
-  const jobs = useProjectStore((s) => s.jobs);
-  const latestAnalysisJobId = useProjectStore((s) => s.latestAnalysisJobId);
   const selectedClipId = useTimelineStore((s) => s.selectedClipId);
   const selectedTrackId = useTimelineStore((s) => s.selectedTrackId);
   const previewMediaId = useTimelineStore((s) => s.previewMediaId);
@@ -557,23 +575,9 @@ export function ClipAnalysisPanel() {
   const legacySceneDisplay = legacyScene ? sceneAnalysisDisplay(legacyScene) : null;
   const suggestion = findClipSuggestion(project.analysis.editSuggestions, selectedClip?.id ?? null);
   const isAnalyzing = media ? analyzingIds.has(media.id) : analyzingIds.size > 0;
-  const projectIsAnalyzed = !!legacySummary || project.analysis.sceneCount > 0;
-  const isAnalyzed = media ? !!legacyVideo : projectIsAnalyzed;
-  const totalLegacyScenes =
-    legacySummary?.videos?.reduce(
-      (count, video) => count + (video.visual_analysis?.scenes?.length ?? 0),
-      0,
-    ) ?? 0;
-  const latestAnalysisJob = latestAnalysisJobId ? jobs[latestAnalysisJobId] : null;
-  const latestAnalysisResult = latestAnalysisJob ? getAnalysisJobResult(latestAnalysisJob) : null;
-  const analysisStatus = analysisError
+  const isAnalyzed = !!legacyVideo;
+  const syncStatus = analysisError
     ? "同步失败"
-    : latestAnalysisJob
-      ? `${latestAnalysisResult?.stageLabel ?? latestAnalysisJob.status}${
-          latestAnalysisResult?.currentMediaName
-            ? ` · ${latestAnalysisResult.currentMediaName}`
-            : ""
-        } · ${latestAnalysisJob.progress}%`
     : isLoadingAnalysis
       ? "正在读取 API 分析..."
       : analysisSyncedAt
@@ -584,14 +588,14 @@ export function ClipAnalysisPanel() {
 
   if (!media) {
     return (
-      <ProjectAnalysisOverview
-        project={project}
-        legacySummary={legacySummary}
-        analysisStatus={analysisStatus}
-        analysisError={analysisError}
-        totalLegacyScenes={totalLegacyScenes}
-        isAnalyzed={projectIsAnalyzed}
-      />
+      <div className="flex h-full flex-col text-sm">
+        <div className="min-h-0 flex-1 overflow-y-auto pb-3">
+          <SectionLabel>当前素材</SectionLabel>
+          <p className="px-3 py-2 text-[12px] leading-5 text-white/28">
+            请选择左侧素材或时间线片段查看 AI 分析。
+          </p>
+        </div>
+      </div>
     );
   }
 
@@ -629,23 +633,12 @@ export function ClipAnalysisPanel() {
   return (
     <div className="flex h-full flex-col text-sm">
       <div className="min-h-0 flex-1 overflow-y-auto pb-3">
-        <SectionLabel>项目分析</SectionLabel>
-        <div className="px-3 pb-2 text-[11px] leading-4 text-white/25">{analysisStatus}</div>
+        <div className="px-3 pb-2 text-[11px] leading-4 text-white/25">{syncStatus}</div>
         {analysisError ? (
           <div className="mx-3 mb-2 rounded-[7px] border border-amber-300/15 bg-amber-300/[0.06] px-2 py-1.5 text-[11px] leading-4 text-amber-100/55">
             {analysisError}
           </div>
         ) : null}
-        <InfoCard icon={<Info className="size-3.5 text-sky-300/55" />} title="汇总">
-          <DetailRow label="视频数量" value={legacySummary?.total_videos ?? project.mediaItems.length} />
-          <DetailRow label="图像模型" value={legacySummary?.image_model ?? legacyVideo?.image_model} />
-          <DetailRow label="镜头数量" value={totalLegacyScenes || project.analysis.sceneCount} />
-          <p className="mt-2 text-[12px] leading-5 text-white/35">
-            {project.analysis.overallSummary || legacyVideo?.overall_summary || "暂无整体摘要"}
-          </p>
-        </InfoCard>
-
-        <Divider />
 
         <SectionLabel>{selectedClip ? "当前片段" : "当前素材"}</SectionLabel>
         <div className="px-3 py-1 text-[13px] font-medium text-white/80">
@@ -675,23 +668,7 @@ export function ClipAnalysisPanel() {
           icon={<Clapperboard className="size-3.5 text-white/35" />}
           title="内容识别"
         >
-          <p className="text-[12px] leading-5 text-white/38">
-            {formatValue(
-              (legacySceneDisplay
-                ? valueByKey(legacySceneDisplay.visualRows, "subject")
-                : null) ??
-                legacyVideo?.overall_summary ??
-                "当前素材还没有可用的镜头描述。",
-            )}
-          </p>
-          {legacySceneDisplay ? (
-            <div className="mt-2">
-              <SegmentTypePill
-                label={legacySceneDisplay.segmentType}
-                tone={legacySceneDisplay.segmentTypeTone}
-              />
-            </div>
-          ) : null}
+          <ContentRecognitionSummary display={legacySceneDisplay} fallbackSummary={legacyVideo?.overall_summary} />
         </InfoCard>
 
         <Divider />

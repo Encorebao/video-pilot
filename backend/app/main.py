@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import analysis, export, health, jobs, media, projects, script_edit, settings, subtitles, voice, whisper
+from app.api import analysis, export, health, jobs, media, projects, script_edit, settings, subtitles, vl_debug, voice, whisper
 from app.core.config import ensure_storage_dirs
 
 
@@ -26,6 +26,7 @@ def create_app() -> FastAPI:
     app.include_router(script_edit.router)
     app.include_router(settings.router)
     app.include_router(subtitles.router)
+    app.include_router(vl_debug.router)
     app.include_router(voice.router)
     app.include_router(whisper.router)
     return app

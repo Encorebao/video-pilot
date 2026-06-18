@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 from app.schemas.analysis import AnalysisResults
-from app.services.analysis_merge import legacy_scene_count, merge_legacy_summaries
+from app.services.analysis_merge import build_keyword_dictionary, legacy_scene_count, merge_legacy_summaries
 from app.services.project_manifest import open_project
 
 
@@ -37,5 +37,6 @@ def load_project_analysis(folder_path: str) -> AnalysisResults:
     analysis["legacySummary"] = merged_summary
     if merged_summary is not None:
         analysis["sceneCount"] = legacy_scene_count(merged_summary)
+        analysis["keywordDictionary"] = build_keyword_dictionary(merged_summary)
 
     return AnalysisResults.model_validate(analysis)

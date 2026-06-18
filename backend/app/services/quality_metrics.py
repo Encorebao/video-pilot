@@ -13,6 +13,19 @@ BRIGHT_MIN = 40.0
 NOISE_THRESHOLD = 15.0
 COMPOSITION_THRESHOLD = 0.25
 SHAKE_THRESHOLD = 5.0
+CLOSE_UP_SHOT_TYPES = {
+    "特写",
+    "极特写",
+    "局部特写",
+    "细节特写",
+    "微距",
+    "close-up",
+    "closeup",
+    "extreme close-up",
+}
+FOCUS_ISSUE_KEYWORDS = ("虚焦", "模糊", "失焦", "对焦", "焦外")
+TOLERATED_CLOSE_UP_BLUR_ISSUE = "浅景深焦外虚化，需人工确认主体焦点"
+TOLERATED_CLOSE_UP_BLUR_CONTEXT = "特写镜头允许焦外虚化，未单独作为废片依据"
 
 
 def _blur_score(frame: np.ndarray) -> float:
@@ -108,6 +121,42 @@ def compute_overall_grade(metrics: dict) -> str:
     if issue_count <= 3:
         return "备选"
     return "废片"
+
+
+def _issue_list(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _is_close_up_shot_type(value: object) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized in CLOSE_UP_SHOT_TYPES
+
+
+def _is_focus_issue(issue: str) -> bool:
+    return any(keyword in issue for keyword in FOCUS_ISSUE_KEYWORDS)
+
+
+def contextualize_quality_for_shot_type(quality: dict, shot_type: object) -> dict:
+    if not _is_close_up_shot_type(shot_type):
+        return quality
+
+    issues = _issue_list(quality.get("issues"))
+    if str(quality.get("grade") or "").strip() != "废片" or not issues:
+        return quality
+    if any(not _is_focus_issue(issue) for issue in issues):
+        return quality
+
+    return {
+        **quality,
+        "grade": "可用",
+        "issues": [TOLERATED_CLOSE_UP_BLUR_ISSUE],
+        "close_up_blur_tolerated": True,
+        "focus_context": TOLERATED_CLOSE_UP_BLUR_CONTEXT,
+    }
 
 
 def analyze_keyframe_quality(

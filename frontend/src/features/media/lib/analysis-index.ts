@@ -83,6 +83,10 @@ function stringList(value: unknown): string[] {
   return [];
 }
 
+function uniqueStrings(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
 function taxonomyField(taxonomy: AnalysisTaxonomy | null, fieldId: string) {
   return taxonomy?.fields.find((field) => field.id === fieldId) ?? null;
 }
@@ -157,17 +161,25 @@ function sceneIndex(
   taxonomy: AnalysisTaxonomy | null,
 ): SceneAnalysisIndex {
   const vl = scene.vl_analysis ?? {};
-  const keywords = stringList(vl.search_keywords);
+  const keywords = uniqueStrings([
+    ...stringList(vl.subject_keywords),
+    ...stringList(vl.scene_keywords),
+    ...stringList(vl.search_keywords),
+  ]);
   const filterValues = taxonomyValuesForScene(scene, taxonomy);
   const textParts = [
+    vl.visual_description,
     vl.subject,
     vl.action,
+    vl.place_context,
     vl.environment,
     vl.lighting,
     vl.color_tone,
     vl.emotion_atmosphere,
     vl.edit_suggestion,
     vl.notable_details,
+    normalizeText(vl.subject_keywords),
+    normalizeText(vl.scene_keywords),
     keywords.join(" "),
     ...Object.values(filterValues).flat(),
   ];
@@ -219,6 +231,13 @@ export function buildMediaAnalysisIndex(
       .filter(Boolean)
       .join(" "),
   };
+}
+
+export function pendingBatchAnalysisMediaIds(project: ProjectRecord): string[] {
+  return project.mediaItems
+    .filter((item) => item.type === "video")
+    .filter((item) => !buildMediaAnalysisIndex(project, item, null))
+    .map((item) => item.id);
 }
 
 export function matchesQuery(index: MediaAnalysisIndex | null, media: MediaItem, query: string) {

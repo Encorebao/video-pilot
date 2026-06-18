@@ -319,26 +319,98 @@ def clamp_time(time_sec: float, duration: float) -> float:
     return round(time_sec, 3)
 
 
-def scene_probe_times(scene: dict[str, Any], video_duration: float) -> list[dict[str, float | str]]:
+def _full_scene_probe_count(scene_duration: float) -> int:
+    if scene_duration < 0.6:
+        return 1
+    if scene_duration < 2.0:
+        return 3
+    if scene_duration < 6.0:
+        return 5
+    if scene_duration < 12.0:
+        return 7
+    return 9
+
+
+def _initial_scene_probe_count(scene_duration: float) -> int:
+    full_count = _full_scene_probe_count(scene_duration)
+    if full_count <= 3:
+        return full_count
+    if scene_duration < 6.0:
+        return 3
+    return 5
+
+
+def _scene_probe_times(
+    scene: dict[str, Any],
+    video_duration: float,
+    *,
+    count: int,
+) -> list[dict[str, float | str]]:
     start = float(scene.get("start", 0.0))
     end = float(scene.get("end", start))
     if end < start:
         start, end = end, start
 
-    if end - start < 0.6:
+    if count <= 1:
         middle = clamp_time((start + end) / 2.0, video_duration)
-        return [{"label": "middle", "time": middle}]
+        return [{"label": "sample_01", "time": middle}]
 
-    probes = [
-        {"label": "first", "time": clamp_time(start + 0.1, video_duration)},
-        {"label": "middle", "time": clamp_time(start + (end - start) / 2.0, video_duration)},
-        {"label": "last", "time": clamp_time(end - 0.1, video_duration)},
+    first_time = clamp_time(start + 0.1, video_duration)
+    last_time = clamp_time(end - 0.1, video_duration)
+    if last_time <= first_time:
+        middle = clamp_time((start + end) / 2.0, video_duration)
+        return [{"label": "sample_01", "time": middle}]
+
+    step = (last_time - first_time) / float(count - 1)
+    return [
+        {
+            "label": f"sample_{index + 1:02d}",
+            "time": clamp_time(first_time + step * index, video_duration),
+        }
+        for index in range(count)
     ]
-    deduped: list[dict[str, float | str]] = []
-    for item in probes:
-        if not deduped or abs(float(item["time"]) - float(deduped[-1]["time"])) > 0.05:
-            deduped.append(item)
-    return deduped
+
+
+def _select_probe_subset(
+    probes: list[dict[str, float | str]],
+    *,
+    count: int,
+) -> list[dict[str, float | str]]:
+    if count >= len(probes):
+        return probes
+    if count <= 1:
+        return [probes[len(probes) // 2]]
+    indexes = sorted(
+        {
+            round(index * (len(probes) - 1) / float(count - 1))
+            for index in range(count)
+        }
+    )
+    return [probes[index] for index in indexes]
+
+
+def expanded_scene_probe_times(scene: dict[str, Any], video_duration: float) -> list[dict[str, float | str]]:
+    start = float(scene.get("start", 0.0))
+    end = float(scene.get("end", start))
+    if end < start:
+        start, end = end, start
+    return _scene_probe_times(
+        scene,
+        video_duration,
+        count=_full_scene_probe_count(end - start),
+    )
+
+
+def scene_probe_times(scene: dict[str, Any], video_duration: float) -> list[dict[str, float | str]]:
+    start = float(scene.get("start", 0.0))
+    end = float(scene.get("end", start))
+    if end < start:
+        start, end = end, start
+    full_probes = expanded_scene_probe_times(scene, video_duration)
+    return _select_probe_subset(
+        full_probes,
+        count=_initial_scene_probe_count(end - start),
+    )
 
 
 def extract_keyframe(
@@ -446,11 +518,19 @@ def extract_video_keyframes(video_path: Path, output_root: Path) -> dict[str, An
         samples = []
         middle_sample = None
         middle_frame_path = frames_dir / f"frame_{index:03d}.jpg"
+        scene_middle = float(scene.get("start", 0.0) or 0.0) + (
+            float(scene.get("end", 0.0) or 0.0) - float(scene.get("start", 0.0) or 0.0)
+        ) / 2.0
+        middle_probe = min(
+            probes,
+            key=lambda item: abs(float(item["time"]) - scene_middle),
+            default=None,
+        )
         for probe in probes:
             label = str(probe["label"])
             frame_path = (
                 middle_frame_path
-                if label == "middle"
+                if middle_probe is not None and probe is middle_probe
                 else frames_dir / f"frame_{index:03d}_{label}.jpg"
             )
             if frame_color_transform.get("applied"):
@@ -468,7 +548,7 @@ def extract_video_keyframes(video_path: Path, output_root: Path) -> dict[str, An
                 "frame": str(frame_path),
             }
             samples.append(sample)
-            if label == "middle":
+            if middle_probe is not None and probe is middle_probe:
                 middle_sample = sample
 
         if middle_sample is None and samples:
@@ -477,7 +557,7 @@ def extract_video_keyframes(video_path: Path, output_root: Path) -> dict[str, An
         scene["keyframe"] = middle_sample.get("frame") if middle_sample else None
         scene["keyframe_time"] = middle_sample.get("time") if middle_sample else None
         scene["movement_probe"] = {
-            "method": "first_middle_last",
+            "method": "adaptive_temporal_samples",
             "samples": samples,
         }
         if scene.get("keyframe"):

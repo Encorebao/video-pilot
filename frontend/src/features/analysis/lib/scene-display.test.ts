@@ -26,6 +26,7 @@ test("normalizes segment analysis into one Chinese scene display without duplica
       visual: {
         shot_type: "中景",
         subject: "人物讲解产品",
+        place_context: "线下零售店",
         search_keywords: ["人物", "产品"],
       },
       camera: {
@@ -74,6 +75,8 @@ test("normalizes segment analysis into one Chinese scene display without duplica
     ],
   );
   assert.equal(display.visualRows.find((row) => row.key === "subject")?.value, "人物讲解产品");
+  assert.equal(display.visualRows.find((row) => row.key === "place_context")?.label, "地点判断");
+  assert.equal(display.visualRows.find((row) => row.key === "place_context")?.value, "线下零售店");
   assert.equal(display.visualRows.find((row) => row.key === "edit_role")?.value, "主叙事");
   assert.deepEqual(
     display.extraVisualRows.map((row) => row.key),
@@ -89,11 +92,68 @@ test("normalizes segment analysis into one Chinese scene display without duplica
   );
 });
 
+test("hides visual fields when paired classifier values repeat the readable value", () => {
+  const display = sceneAnalysisDisplay({
+    segment_analysis: {
+      segment_type: "broll",
+      speech: {
+        has_speech: false,
+        transcript: "",
+        summary: "",
+      },
+      visual: {
+        shot_type: "中景",
+        subject: "街道",
+        subject_category: "街道",
+        action: "无明显动作",
+        action_type: "无明显动作",
+        environment: "城市街道",
+        environment_type: "城市街道",
+        lighting: "自然光",
+        lighting_type: "自然光",
+        color_tone: "中性色调",
+        color_tone_type: "中性色调",
+        emotion_atmosphere: "宁静",
+        emotion_tags: ["宁静", "纪实"],
+        notable_details: "画面抖动",
+      },
+      camera: {
+        movement: "轻微抖动",
+      },
+      quality: {
+        grade: "可用",
+        issues: ["画面抖动"],
+      },
+      edit_role: "B-roll",
+      edit_suggestion: "适合过渡。",
+    },
+  });
+
+  const visualKeys = display.visualRows.map((row) => row.key);
+
+  assert.equal(visualKeys.includes("subject"), true);
+  assert.equal(visualKeys.includes("subject_category"), false);
+  assert.equal(visualKeys.includes("action"), true);
+  assert.equal(visualKeys.includes("action_type"), false);
+  assert.equal(visualKeys.includes("environment"), true);
+  assert.equal(visualKeys.includes("environment_type"), false);
+  assert.equal(visualKeys.includes("lighting"), true);
+  assert.equal(visualKeys.includes("lighting_type"), false);
+  assert.equal(visualKeys.includes("color_tone"), true);
+  assert.equal(visualKeys.includes("color_tone_type"), false);
+  assert.equal(visualKeys.includes("emotion_atmosphere"), true);
+  assert.equal(visualKeys.includes("emotion_tags"), true);
+  assert.equal(visualKeys.includes("notable_details"), false);
+});
+
 test("translates common UI values used by the analysis panel", () => {
   assert.equal(mediaTypeLabel("video"), "视频");
   assert.equal(mediaTypeLabel("generated-audio"), "生成音频");
   assert.equal(sourceTypeLabel("imported-video"), "导入视频");
   assert.equal(sourceTypeLabel("tts"), "语音合成");
   assert.equal(movementSampleLabel("middle"), "中间帧");
+  assert.equal(movementSampleLabel("sample_01"), "采样 1");
+  assert.equal(movementSampleLabel("sample_09"), "采样 9");
   assert.equal(movementMethodLabel("first_middle_last"), "首帧/中间帧/尾帧");
+  assert.equal(movementMethodLabel("adaptive_temporal_samples"), "时序抽帧");
 });
